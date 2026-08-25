@@ -1,0 +1,64 @@
+{
+  "title": "EVN CSKH Monitor",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up EVN CSKH Monitor",
+        "description": "A new independent integration. Enter your EVN account and customer ID; the flow validates them against the EVN server.",
+        "data": {
+          "region": "Power region",
+          "username": "Username",
+          "password": "Password",
+          "customer_id": "Customer / meter ID"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure EVN account",
+        "data": {
+          "region": "Power region",
+          "username": "Username",
+          "password": "Password",
+          "customer_id": "Customer / meter ID"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate EVN account",
+        "description": "The EVN server no longer accepts the stored credentials. Enter the username and password again.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_customer_id": "The customer ID is invalid.",
+      "wrong_region": "The customer ID does not match the selected EVN region.",
+      "invalid_auth": "Login failed. Check the username and password.",
+      "cannot_connect": "Could not connect to or read data from the EVN server.",
+      "no_data": "Login succeeded but EVN returned no data for this customer ID."
+    },
+    "abort": {
+      "already_configured": "This customer ID is already configured.",
+      "unique_id_mismatch": "The customer ID of this entry cannot be changed.",
+      "reconfigure_successful": "EVN CSKH Monitor configuration updated.",
+      "reauth_successful": "EVN account reauthenticated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "EVN CSKH Monitor options",
+        "description": "Configure the billing period and Zalo Bot. Type 0 = User, type 1 = Group.",
+        "data": {
+          "ngaydauky": "Billing period start day",
+          "zalo_type": "Zalo type",
+          "zalo_account_selection": "Zalo account_selection",
+          "zalo_thread_id": "Zalo thread_id",
+          "zalo_send_invoice": "Send new invoice PNG/PDF via Zalo",
+          "zalo_send_daily": "Send daily consumption via Zalo",
+          "zalo_send_outage": "Send outage schedules via Zalo"
+        }
+      }
+    }
+  }
+}

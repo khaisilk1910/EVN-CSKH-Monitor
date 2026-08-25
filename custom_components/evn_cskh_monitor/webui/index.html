@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0b1220">
+  <title>EVN CSKH Monitor</title>
+  <link rel="icon" href="icon.png">
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="icon.png" alt="EVN CSKH Monitor">
+      <div><h1>EVN CSKH Monitor</h1><p>Dữ liệu EVN, hóa đơn, sản lượng và lịch cắt điện</p></div>
+    </div>
+    <div class="toolbar">
+      <select id="accountSelect" aria-label="Tài khoản EVN"></select>
+      <select id="yearSelect" aria-label="Năm"><option value="all">Tất cả năm</option></select>
+      <button id="reloadBtn" type="button">Làm mới màn hình</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="notice" class="notice hidden"></section>
+    <section class="status-row">
+      <span id="syncStatus" class="pill">Chưa đồng bộ</span>
+      <span id="customerMeta" class="muted"></span>
+    </section>
+
+    <section class="metric-grid">
+      <article class="metric"><span>Tổng sản lượng</span><strong id="totalKwh">—</strong><small>kWh trong dữ liệu đã lưu</small></article>
+      <article class="metric"><span>Tiền hóa đơn EVN</span><strong id="officialCost">—</strong><small>chỉ số tiền chính thức từ hóa đơn</small></article>
+      <article class="metric"><span>Trung bình/ngày</span><strong id="avgDaily">—</strong><small>kWh/ngày có dữ liệu</small></article>
+      <article class="metric"><span>Độ phủ dữ liệu</span><strong id="coverage">—</strong><small id="coverageDetail">—</small></article>
+      <article class="metric"><span>Hóa đơn chính thức</span><strong id="invoiceCount">—</strong><small>tháng có số tiền EVN</small></article>
+      <article class="metric"><span>Dữ liệu server gốc</span><strong id="rawCount">—</strong><small>response khác nhau đã lưu nguyên bản</small></article>
+      <article class="metric"><span>Tiền nợ</span><strong id="debt">—</strong><small>theo trạng thái hóa đơn EVN</small></article>
+      <article class="metric"><span>File hóa đơn</span><strong id="fileCount">—</strong><small>PNG/PDF thực trong /config/evncskh</small></article>
+    </section>
+
+    <section class="panel two-col">
+      <div>
+        <div class="panel-head"><div><h2>Sản lượng theo tháng</h2><p>Không trộn tiền ước tính với hóa đơn EVN.</p></div></div>
+        <div id="monthlyBars" class="bars"></div>
+      </div>
+      <div>
+        <div class="panel-head"><div><h2>Chất lượng dữ liệu</h2><p>Giúp phát hiện ngày thiếu hoặc đồng bộ chưa hoàn chỉnh.</p></div></div>
+        <dl class="details" id="qualityDetails"></dl>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div><h2>Hóa đơn theo tháng</h2><p>Sản lượng, tiền, trạng thái và nguồn dữ liệu.</p></div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Tháng</th><th>Sản lượng</th><th>Tiền điện</th><th>Trạng thái</th><th>Nguồn</th></tr></thead><tbody id="monthlyTable"></tbody></table></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head daily-head">
+        <div><h2>Sản lượng hằng ngày</h2><p>Tiền điện theo ngày để trống vì biểu giá bậc thang không cho phép phân bổ chính xác từng ngày.</p></div>
+        <div class="range"><input id="startDate" type="date"><input id="endDate" type="date"><button id="applyRange" type="button">Lọc</button><button id="clearRange" type="button" class="secondary">Xóa lọc</button></div>
+      </div>
+      <div class="table-wrap tall"><table><thead><tr><th>Ngày</th><th>Chỉ số công tơ</th><th>Sản lượng</th></tr></thead><tbody id="dailyTable"></tbody></table></div>
+    </section>
+
+    <section class="panel two-col">
+      <div><div class="panel-head"><div><h2>Lịch cắt điện</h2><p>Lịch tương lai lấy từ dữ liệu EVN đã đồng bộ.</p></div></div><div id="outages" class="list"></div></div>
+      <div><div class="panel-head"><div><h2>File & trạng thái đồng bộ</h2><p>File hóa đơn và lỗi từng phần gần nhất.</p></div></div><div id="invoiceFiles" class="list"></div><div id="partialErrors" class="errors"></div></div>
+    </section>
+  </main>
+
+  <template id="emptyTemplate"><div class="empty">Chưa có dữ liệu.</div></template>
+  <script src="assets/app.js"></script>
+</body>
+</html>

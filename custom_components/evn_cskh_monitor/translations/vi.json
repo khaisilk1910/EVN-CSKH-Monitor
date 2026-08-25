@@ -1,0 +1,77 @@
+{
+  "title": "EVN CSKH Monitor",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Thiết lập EVN CSKH Monitor",
+        "description": "Tích hợp mới, độc lập. Nhập tài khoản EVN và mã khách hàng để kiểm tra trực tiếp với máy chủ EVN.",
+        "data": {
+          "region": "Khu vực điện lực",
+          "username": "Tên đăng nhập",
+          "password": "Mật khẩu",
+          "customer_id": "Mã khách hàng / công tơ"
+        },
+        "data_description": {
+          "region": "PD=HN, PE=HCMC, PA/PH/PM/PN=NPC, PC/PP/PQ=CPC, PB/PK=SPC.",
+          "customer_id": "Mã khách hàng EVN bắt đầu bằng P hoặc S."
+        }
+      },
+      "reconfigure": {
+        "title": "Cấu hình lại tài khoản EVN",
+        "data": {
+          "region": "Khu vực điện lực",
+          "username": "Tên đăng nhập",
+          "password": "Mật khẩu",
+          "customer_id": "Mã khách hàng / công tơ"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Xác thực lại tài khoản EVN",
+        "description": "Máy chủ EVN không còn chấp nhận thông tin đăng nhập đã lưu. Nhập lại tên đăng nhập và mật khẩu.",
+        "data": {
+          "username": "Tên đăng nhập",
+          "password": "Mật khẩu"
+        }
+      }
+    },
+    "error": {
+      "invalid_customer_id": "Mã khách hàng không hợp lệ.",
+      "wrong_region": "Mã khách hàng không thuộc khu vực EVN đã chọn.",
+      "invalid_auth": "Không đăng nhập được. Hãy kiểm tra tên đăng nhập và mật khẩu.",
+      "cannot_connect": "Không thể kết nối hoặc đọc dữ liệu từ máy chủ EVN.",
+      "no_data": "Đăng nhập thành công nhưng máy chủ không trả dữ liệu cho mã khách hàng này."
+    },
+    "abort": {
+      "already_configured": "Mã khách hàng này đã được cấu hình.",
+      "unique_id_mismatch": "Không thể đổi mã khách hàng của cấu hình hiện tại.",
+      "reconfigure_successful": "Đã cập nhật cấu hình EVN CSKH Monitor.",
+      "reauth_successful": "Đã xác thực lại tài khoản EVN."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "EVN CSKH Monitor - Tùy chọn",
+        "description": "Cấu hình chu kỳ tính điện và Zalo Bot. Type 0 = User, type 1 = Group. Nếu không dùng Zalo, để trống account_selection/thread_id và tắt các công tắc gửi.",
+        "data": {
+          "ngaydauky": "Ngày bắt đầu kỳ điện",
+          "zalo_type": "Zalo type",
+          "zalo_account_selection": "Zalo account_selection",
+          "zalo_thread_id": "Zalo thread_id",
+          "zalo_send_invoice": "Gửi PNG/PDF hóa đơn mới qua Zalo",
+          "zalo_send_daily": "Gửi sản lượng hằng ngày qua Zalo",
+          "zalo_send_outage": "Gửi lịch cắt điện qua Zalo"
+        },
+        "data_description": {
+          "ngaydauky": "Ngày 1-31; ngày vượt quá số ngày của tháng sẽ tự kẹp về ngày cuối tháng.",
+          "zalo_type": "0 = User, 1 = Group.",
+          "zalo_account_selection": "Tài khoản Zalo Bot dùng để gửi thông báo.",
+          "zalo_thread_id": "ID người dùng hoặc nhóm nhận thông báo.",
+          "zalo_send_invoice": "Gửi file thực có tại /config/evncskh khi phát hiện mới hoặc thay đổi.",
+          "zalo_send_daily": "Gửi một lần khi dữ liệu sản lượng của ngày hôm qua thay đổi.",
+          "zalo_send_outage": "Gửi lịch cắt điện tương lai mới, có chống gửi trùng."
+        }
+      }
+    }
+  }
+}
