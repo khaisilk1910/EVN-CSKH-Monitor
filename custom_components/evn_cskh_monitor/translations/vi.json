@@ -51,27 +51,92 @@
   "options": {
     "step": {
       "init": {
-        "title": "EVN CSKH Monitor - Tùy chọn",
-        "description": "Cấu hình chu kỳ tính điện và Zalo Bot. Type 0 = User, type 1 = Group. Nếu không dùng Zalo, để trống account_selection/thread_id và tắt các công tắc gửi.",
+        "title": "Tùy chọn EVN CSKH Monitor",
+        "description": "Chọn phần bạn muốn quản lý.",
+        "menu_options": {
+          "general": "Cấu hình chung và WebUI",
+          "zalo_accounts": "Tài khoản / nơi nhận Zalo"
+        },
+        "menu_option_descriptions": {
+          "general": "Chu kỳ điện và tiêu đề WebUI.",
+          "zalo_accounts": "Thêm, sửa, xóa nhiều cấu hình Zalo Bot để gửi thông báo."
+        }
+      },
+      "general": {
+        "title": "Cấu hình chung và WebUI",
+        "description": "Các thay đổi này áp dụng ngay, không cần đăng nhập EVN lại.",
         "data": {
           "ngaydauky": "Ngày bắt đầu kỳ điện",
-          "zalo_type": "Zalo type",
-          "zalo_account_selection": "Zalo account_selection",
-          "zalo_thread_id": "Zalo thread_id",
-          "zalo_send_invoice": "Gửi PNG/PDF hóa đơn mới qua Zalo",
-          "zalo_send_daily": "Gửi sản lượng hằng ngày qua Zalo",
-          "zalo_send_outage": "Gửi lịch cắt điện qua Zalo"
+          "webui_title": "Tiêu đề WebUI",
+          "webui_subtitle": "Mô tả dưới tiêu đề WebUI"
         },
         "data_description": {
-          "ngaydauky": "Ngày 1-31; ngày vượt quá số ngày của tháng sẽ tự kẹp về ngày cuối tháng.",
+          "ngaydauky": "Ngày 1-31; nếu tháng ngắn hơn sẽ tự dùng ngày cuối tháng.",
+          "webui_title": "Tên hiển thị ở góc trên bên trái trang EVN CSKH Monitor.",
+          "webui_subtitle": "Dòng mô tả nhỏ bên dưới tiêu đề, có thể để trống."
+        }
+      },
+      "zalo_accounts": {
+        "title": "Quản lý Zalo",
+        "description": "Đang có {count} cấu hình: {accounts}. Mỗi cấu hình có thể dùng account_selection, type User/Group, thread_id và các công tắc gửi riêng.",
+        "data": {
+          "zalo_action": "Thao tác",
+          "zalo_recipient_id": "Tài khoản / nơi nhận"
+        }
+      },
+      "zalo_add": {
+        "title": "Thêm cấu hình Zalo",
+        "description": "Cấu hình mới sẽ lấy trạng thái hiện tại làm mốc ban đầu, vì vậy không gửi lại hóa đơn cũ, lịch cắt điện cũ hoặc sản lượng đã có.",
+        "data": {
+          "zalo_recipient_name": "Tên dễ nhớ",
+          "zalo_recipient_enabled": "Bật cấu hình này",
+          "zalo_type": "Type",
+          "zalo_account_selection": "Zalo Bot account_selection",
+          "zalo_thread_id": "thread_id",
+          "zalo_send_invoice": "Gửi PNG/PDF hóa đơn mới",
+          "zalo_send_daily": "Gửi sản lượng hằng ngày",
+          "zalo_send_outage": "Gửi lịch cắt điện"
+        },
+        "data_description": {
           "zalo_type": "0 = User, 1 = Group.",
-          "zalo_account_selection": "Tài khoản Zalo Bot dùng để gửi thông báo.",
-          "zalo_thread_id": "ID người dùng hoặc nhóm nhận thông báo.",
-          "zalo_send_invoice": "Gửi file thực có tại /config/evncskh khi phát hiện mới hoặc thay đổi.",
-          "zalo_send_daily": "Gửi một lần khi dữ liệu sản lượng của ngày hôm qua thay đổi.",
-          "zalo_send_outage": "Gửi lịch cắt điện tương lai mới, có chống gửi trùng."
+          "zalo_account_selection": "Tài khoản gửi do tích hợp Zalo Bot cung cấp.",
+          "zalo_thread_id": "ID user/group nhận tin; lưu dạng chuỗi để không mất số với ID lớn.",
+          "zalo_send_invoice": "Chỉ gửi file thật mới hoặc file có thay đổi.",
+          "zalo_send_daily": "Gửi khi sản lượng hôm qua trong dữ liệu lưu thay đổi.",
+          "zalo_send_outage": "Gửi khi xuất hiện lịch cắt điện tương lai mới."
+        }
+      },
+      "zalo_edit": {
+        "title": "Sửa cấu hình Zalo",
+        "description": "Đang sửa {name}. Lịch sử chống gửi trùng được giữ lại nên đổi account/thread sẽ không gửi lại dữ liệu cũ.",
+        "data": {
+          "zalo_recipient_name": "Tên dễ nhớ",
+          "zalo_recipient_enabled": "Bật cấu hình này",
+          "zalo_type": "Type",
+          "zalo_account_selection": "Zalo Bot account_selection",
+          "zalo_thread_id": "thread_id",
+          "zalo_send_invoice": "Gửi PNG/PDF hóa đơn mới",
+          "zalo_send_daily": "Gửi sản lượng hằng ngày",
+          "zalo_send_outage": "Gửi lịch cắt điện"
+        },
+        "data_description": {
+          "zalo_type": "0 = User, 1 = Group.",
+          "zalo_account_selection": "Tài khoản gửi do tích hợp Zalo Bot cung cấp.",
+          "zalo_thread_id": "ID user/group nhận tin; lưu dạng chuỗi để không mất số với ID lớn."
+        }
+      },
+      "zalo_delete": {
+        "title": "Xóa cấu hình Zalo",
+        "description": "Xóa {name}? Chỉ cấu hình gửi Zalo bị xóa, dữ liệu EVN không bị ảnh hưởng.",
+        "data": {
+          "confirm_delete": "Xác nhận xóa"
         }
       }
+    },
+    "error": {
+      "select_recipient": "Hãy chọn một cấu hình Zalo đang có.",
+      "confirm_delete": "Hãy bật xác nhận trước khi xóa.",
+      "required_value": "Không được để trống trường này."
     }
   }
 }

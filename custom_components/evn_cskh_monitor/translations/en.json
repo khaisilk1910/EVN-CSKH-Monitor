@@ -10,6 +10,10 @@
           "username": "Username",
           "password": "Password",
           "customer_id": "Customer / meter ID"
+        },
+        "data_description": {
+          "region": "PD=HN, PE=HCMC, PA/PH/PM/PN=NPC, PC/PP/PQ=CPC, PB/PK=SPC.",
+          "customer_id": "EVN customer ID, normally starting with P or S."
         }
       },
       "reconfigure": {
@@ -48,17 +52,91 @@
     "step": {
       "init": {
         "title": "EVN CSKH Monitor options",
-        "description": "Configure the billing period and Zalo Bot. Type 0 = User, type 1 = Group.",
+        "description": "Choose what you want to manage.",
+        "menu_options": {
+          "general": "General and WebUI",
+          "zalo_accounts": "Zalo destinations"
+        },
+        "menu_option_descriptions": {
+          "general": "Billing cycle and WebUI title.",
+          "zalo_accounts": "Add, edit, or delete multiple Zalo Bot sender/destination routes."
+        }
+      },
+      "general": {
+        "title": "General and WebUI",
+        "description": "These changes apply immediately and do not reconnect to EVN.",
         "data": {
           "ngaydauky": "Billing period start day",
-          "zalo_type": "Zalo type",
-          "zalo_account_selection": "Zalo account_selection",
-          "zalo_thread_id": "Zalo thread_id",
-          "zalo_send_invoice": "Send new invoice PNG/PDF via Zalo",
-          "zalo_send_daily": "Send daily consumption via Zalo",
-          "zalo_send_outage": "Send outage schedules via Zalo"
+          "webui_title": "WebUI title",
+          "webui_subtitle": "WebUI subtitle"
+        },
+        "data_description": {
+          "ngaydauky": "Day 1-31. A day beyond the month length is clamped to the final day.",
+          "webui_title": "Title shown at the upper-left of the EVN CSKH Monitor panel.",
+          "webui_subtitle": "Small description under the WebUI title; it may be blank."
+        }
+      },
+      "zalo_accounts": {
+        "title": "Manage Zalo destinations",
+        "description": "Configured: {count}. {accounts}. Each route can use a different Zalo Bot account, User/Group type, thread ID, and notification switches.",
+        "data": {
+          "zalo_action": "Action",
+          "zalo_recipient_id": "Destination"
+        }
+      },
+      "zalo_add": {
+        "title": "Add Zalo destination",
+        "description": "A new destination is baseline-seeded first, so it will not receive old invoices, old outages, or already-known daily production.",
+        "data": {
+          "zalo_recipient_name": "Display name",
+          "zalo_recipient_enabled": "Enabled",
+          "zalo_type": "Type",
+          "zalo_account_selection": "Zalo Bot account_selection",
+          "zalo_thread_id": "thread_id",
+          "zalo_send_invoice": "Send new invoice PNG/PDF",
+          "zalo_send_daily": "Send daily production",
+          "zalo_send_outage": "Send outage schedules"
+        },
+        "data_description": {
+          "zalo_type": "0 = User, 1 = Group.",
+          "zalo_account_selection": "Sender account exposed by the Zalo Bot integration.",
+          "zalo_thread_id": "Recipient user/group thread ID. Stored as text to preserve large IDs.",
+          "zalo_send_invoice": "Only new or changed real files are sent.",
+          "zalo_send_daily": "Send when yesterday's stored production changes.",
+          "zalo_send_outage": "Send when a new future outage appears."
+        }
+      },
+      "zalo_edit": {
+        "title": "Edit Zalo destination",
+        "description": "Editing {name}. Existing dedupe history is preserved, so changing account or thread does not resend historical data.",
+        "data": {
+          "zalo_recipient_name": "Display name",
+          "zalo_recipient_enabled": "Enabled",
+          "zalo_type": "Type",
+          "zalo_account_selection": "Zalo Bot account_selection",
+          "zalo_thread_id": "thread_id",
+          "zalo_send_invoice": "Send new invoice PNG/PDF",
+          "zalo_send_daily": "Send daily production",
+          "zalo_send_outage": "Send outage schedules"
+        },
+        "data_description": {
+          "zalo_type": "0 = User, 1 = Group.",
+          "zalo_account_selection": "Sender account exposed by the Zalo Bot integration.",
+          "zalo_thread_id": "Recipient user/group thread ID. Stored as text to preserve large IDs."
+        }
+      },
+      "zalo_delete": {
+        "title": "Delete Zalo destination",
+        "description": "Delete {name}? This only removes the notification route; EVN data is not deleted.",
+        "data": {
+          "confirm_delete": "Confirm delete"
         }
       }
+    },
+    "error": {
+      "select_recipient": "Select an existing Zalo destination.",
+      "confirm_delete": "Turn on confirmation before deleting.",
+      "required_value": "A value is required."
     }
   }
 }
