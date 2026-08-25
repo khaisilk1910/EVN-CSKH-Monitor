@@ -29,6 +29,16 @@ Integration có domain, component, API WebUI và thư mục dữ liệu riêng. 
 
 ## Cài đặt
 
+### Cài tự động
+
+  - Nhấn nút bên dưới để thêm vào HACS trên Home Assistant.
+
+  [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=khaisilk1910&repository=EVN-CSKH-Monitor&category=integration)
+
+  - Sau khi thêm trong HACS và khởi động lại Home Assistant
+     
+  - Vào Settings -> Integrations -> Add integration -> Tìm `EVN CSKH Monitor`
+    
 ### HACS
 
 Dùng repository này như một **Custom repository / Integration**, cài `EVN CSKH Monitor`, sau đó restart Home Assistant.
