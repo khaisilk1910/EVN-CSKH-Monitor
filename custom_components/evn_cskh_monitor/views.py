@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from aiohttp import web
@@ -25,6 +26,7 @@ from .const import (
     DOMAIN,
     NAME,
 )
+from .invoice import detect_invoice_type
 from .naming import device_display_name
 
 
@@ -49,30 +51,49 @@ def _json_number(value: Any) -> float | None:
 def _invoice_files(
     data_dir: Path,
     customer_id: str,
-    monthly: list[dict[str, Any]],
+    monthly: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    """List validated invoice files directly from the private data folder.
+
+    Do not depend on a monthly DB row being present: some EVN regions can expose
+    the official attachment through notifications before the billing endpoint is
+    populated. The function runs in Home Assistant's executor.
+    """
+    del monthly  # Kept in the signature for compatibility with older callers.
+    pattern = re.compile(
+        rf"^{re.escape(customer_id)}_(0?[1-9]|1[0-2])_(20\d{{2}})\.(pdf|png)$",
+        re.IGNORECASE,
+    )
     files: list[dict[str, Any]] = []
-    for row in monthly:
-        month = int(row.get("month") or 0)
-        year = int(row.get("year") or 0)
-        if month < 1 or year < 2000:
+    if not data_dir.is_dir():
+        return files
+    for path in data_dir.iterdir():
+        if not path.is_file():
             continue
-        for ext in ("pdf", "png"):
-            path = data_dir / f"{customer_id}_{month}_{year}.{ext}"
-            if not path.is_file():
-                continue
+        match = pattern.fullmatch(path.name)
+        if not match:
+            continue
+        month = int(match.group(1))
+        year = int(match.group(2))
+        ext = match.group(3).lower()
+        try:
             stat = path.stat()
             if stat.st_size <= 0:
                 continue
-            files.append(
-                {
-                    "month": month,
-                    "year": year,
-                    "type": ext,
-                    "name": path.name,
-                    "size": stat.st_size,
-                }
-            )
+            with path.open("rb") as handle:
+                if detect_invoice_type(handle.read(64)) != ext:
+                    continue
+        except OSError:
+            continue
+        files.append(
+            {
+                "month": month,
+                "year": year,
+                "type": ext,
+                "name": path.name,
+                "size": stat.st_size,
+            }
+        )
     files.sort(key=lambda item: (item["year"], item["month"], item["type"]), reverse=True)
     return files
 

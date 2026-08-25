@@ -7,6 +7,7 @@ from datetime import timedelta
 import hashlib
 import logging
 from pathlib import Path
+import re
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -23,6 +24,7 @@ from .calculations import (
 )
 from .const import CONF_CUSTOMER_ID, CONF_NGAYDAUKY, DEFAULT_NGAYDAUKY
 from .database import EVNDatabase
+from .invoice import detect_invoice_type
 from .naming import device_display_name
 from .zalo_config import normalize_zalo_recipients
 
@@ -83,6 +85,31 @@ class ZaloNotifier:
         async with self._process_lock:
             for recipient in recipients:
                 await self._async_seed_recipient(recipient, snapshot, force=True)
+
+    async def async_seed_invoice_files(self, snapshot: dict[str, Any]) -> None:
+        """Baseline only invoice file fingerprints for all enabled routes.
+
+        Used by historical/raw-response recovery so an upgrade can recover old
+        PDF/PNG files without replaying them as new Zalo notifications.
+        """
+        recipients = self._recipients()
+        if not recipients:
+            return
+        async with self._process_lock:
+            files = await self.hass.async_add_executor_job(
+                self._scan_invoice_files, snapshot
+            )
+            for recipient in recipients:
+                for kind, month, year, path in files:
+                    fingerprint = await self.hass.async_add_executor_job(
+                        _file_fingerprint, path
+                    )
+                    await self._set_state(
+                        self._recipient_key(
+                            recipient, f"invoice_{kind}_{month}_{year}"
+                        ),
+                        fingerprint,
+                    )
 
     async def async_process(self, snapshot: dict[str, Any]) -> None:
         """Process enabled notification types without overlapping service calls."""
@@ -205,23 +232,39 @@ class ZaloNotifier:
     def _scan_invoice_files(
         self, snapshot: dict[str, Any]
     ) -> list[tuple[str, int, int, Path]]:
-        found: list[tuple[str, int, int, Path]] = []
-        # Newest first so a genuinely new invoice is delivered before older
-        # changed files. Baseline seeding prevents historical floods.
-        months = sorted(
-            snapshot.get("monthly", []),
-            key=lambda row: (int(row.get("year") or 0), int(row.get("month") or 0)),
-            reverse=True,
+        """Return validated invoice files, newest first.
+
+        Files are discovered from /config/evncskh directly rather than from the
+        monthly snapshot. This handles regions where an attachment arrives in a
+        notification before the corresponding bill row is available.
+        """
+        del snapshot  # Signature retained for the existing executor call sites.
+        pattern = re.compile(
+            rf"^{re.escape(self.customer_id)}_(0?[1-9]|1[0-2])_(20\d{{2}})\.(pdf|png)$",
+            re.IGNORECASE,
         )
-        for row in months:
-            month = int(row.get("month") or 0)
-            year = int(row.get("year") or 0)
-            if not (1 <= month <= 12 and year > 2000):
+        found: list[tuple[str, int, int, Path]] = []
+        if not self.data_dir.is_dir():
+            return found
+        for path in self.data_dir.iterdir():
+            if not path.is_file():
                 continue
-            for kind in ("png", "pdf"):
-                path = self.data_dir / f"{self.customer_id}_{month}_{year}.{kind}"
-                if path.is_file() and path.stat().st_size > 0:
-                    found.append((kind, month, year, path))
+            match = pattern.fullmatch(path.name)
+            if not match:
+                continue
+            month = int(match.group(1))
+            year = int(match.group(2))
+            kind = match.group(3).lower()
+            try:
+                if path.stat().st_size <= 0:
+                    continue
+                with path.open("rb") as handle:
+                    if detect_invoice_type(handle.read(64)) != kind:
+                        continue
+            except OSError:
+                continue
+            found.append((kind, month, year, path))
+        found.sort(key=lambda item: (item[2], item[1], item[0]), reverse=True)
         return found
 
     @staticmethod

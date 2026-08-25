@@ -7,12 +7,19 @@ import json
 import logging
 from typing import Any, Dict, Optional
 from urllib.parse import urljoin
+from urllib.parse import urlsplit
 
 import aiohttp
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import REQUEST_TIMEOUT_SECONDS
+from .invoice import (
+    decode_base64_payload,
+    detect_invoice_type,
+    extract_invoice_links_from_html,
+    iter_attachment_candidates,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,6 +45,15 @@ SPC_LOGIN_URL = "https://api.cskh.evnspc.vn/api/user/authenticate"
 # trả về mọi mã khách hàng của cùng số điện thoại nên phải lọc theo mã đang cấu
 # hình (xem coordinator._save_notification_outages).
 NOTIFICATION_URL = "https://cskh.evn.com.vn/cskh/v1/notification/getAllByUser"
+
+_EVN_AUTH_SUFFIXES = (
+    ".evn.com.vn",
+    ".npc.com.vn",
+    ".cpc.vn",
+    ".evnspc.vn",
+    ".evnhanoi.vn",
+    ".evnhcmc.vn",
+)
 
 
 class EVNAPI:
@@ -1297,82 +1313,236 @@ class EVNAPI:
 
 
     async def get_thongbao(self) -> Optional[list]:
-        """Lấy danh sách thông báo trong app EVN (gồm loại 'Ngừng cấp điện').
-
-        Chỉ chạy cho các region đăng nhập qua cổng chung cskh.evn.com.vn
-        (HN/NPC/CPC/HCMC). SPC có cổng riêng, token không dùng được ở feed này.
-
-        Returns:
-            Danh sách notification (list các dict), hoặc None nếu lỗi/không hỗ trợ.
-        """
-        if self.region == "SPC":
-            return None
-
+        """Get EVN notifications and normalize SPC into the common envelope."""
         if not self.access_token:
             if not await self.login():
                 return None
 
         try:
             session = await self._get_session()
+            if self.region == "SPC":
+                url = f"{self.base_url}/api/NghiepVu/LayDanhSachThongBaoKhachHang"
+                params = {"strMaKh": self.customer_id, "strRedId": ""}
+                headers = {
+                    "accept": "application/json",
+                    "authorization": f"Bearer {self.access_token}",
+                    "user-agent": "evnapp/59 CFNetwork/1240.0.4 Darwin/20.6.0",
+                }
+                data = await self._request_json_with_reauth(
+                    "GET", url, headers=headers, params=params
+                )
+                rows = data.get("data") if isinstance(data, dict) else data
+                if not isinstance(rows, list):
+                    return [] if rows is not None else None
+                normalized: list[dict[str, Any]] = []
+                for item in rows:
+                    if not isinstance(item, dict):
+                        continue
+                    row = dict(item)
+                    title = str(
+                        item.get("strTieuDe")
+                        or item.get("TieuDe")
+                        or item.get("tieuDe")
+                        or item.get("title")
+                        or ""
+                    )
+                    summary = str(
+                        item.get("strNoiDung")
+                        or item.get("noiDung")
+                        or item.get("summary")
+                        or ""
+                    )
+                    folded = f"{title} {summary}".casefold()
+                    if "ngừng" in folded or "ngung" in folded or "mất điện" in folded or "mat dien" in folded:
+                        category = "NGUNGCAP_DIEN"
+                    elif "hóa đơn" in folded or "hoa don" in folded or "tiền điện" in folded or "tien dien" in folded:
+                        category = "HOADON"
+                    else:
+                        category = "KHAC"
+                    row.setdefault("title", title)
+                    row.setdefault("summary", summary)
+                    row.setdefault("notificationType", category)
+                    row.setdefault(
+                        "createdDate",
+                        item.get("strNgayThongBao")
+                        or item.get("ngayTao")
+                        or item.get("NgayTao"),
+                    )
+                    normalized.append(row)
+                return normalized
+
             headers = {
                 "accept": "application/json, text/plain, */*",
                 "content-type": "application/json",
                 "user-agent": "okhttp/4.12.0",
                 "authorization": f"Bearer {self.access_token}",
             }
-
-            async with session.post(
-                NOTIFICATION_URL, json={}, headers=headers, timeout=self._timeout
-            ) as resp:
-                if resp.status == 401:
-                    if await self.login():
-                        headers["authorization"] = f"Bearer {self.access_token}"
-                        async with session.post(
-                            NOTIFICATION_URL, json={}, headers=headers, timeout=self._timeout
-                        ) as retry_resp:
-                            if retry_resp.status != 200:
-                                _LOGGER.error(
-                                    f"get_thongbao failed with status {retry_resp.status}"
-                                )
-                                return None
-                            data = await retry_resp.json()
-                            return data.get("data") if isinstance(data, dict) else None
-                    return None
-
-                if resp.status != 200:
-                    _LOGGER.error(f"get_thongbao failed with status {resp.status}")
-                    return None
-
-                data = await resp.json()
-                return data.get("data") if isinstance(data, dict) else None
-
-        except Exception as e:
-            _LOGGER.error(f"get_thongbao error: {e}", exc_info=True)
+            data = await self._request_json_with_reauth(
+                "POST", NOTIFICATION_URL, headers=headers, json_body={}
+            )
+            return data.get("data") if isinstance(data, dict) else None
+        except Exception as err:
+            _LOGGER.error("get_thongbao error: %s", err, exc_info=True)
             return None
+
+    async def _request_json_with_reauth(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, Any] | None = None,
+        json_body: Any | None = None,
+    ) -> Any | None:
+        """Issue a small JSON request and retry once after an auth refresh."""
+        session = await self._get_session()
+        for attempt in range(2):
+            async with session.request(
+                method,
+                url,
+                params=params,
+                json=json_body,
+                headers=headers,
+                timeout=self._timeout,
+            ) as resp:
+                if resp.status in (401, 403) and attempt == 0:
+                    if not await self.login():
+                        return None
+                    token_key = "Authorization" if "Authorization" in headers else "authorization"
+                    headers[token_key] = f"Bearer {self.access_token}"
+                    continue
+                if resp.status != 200:
+                    text = await resp.text()
+                    _LOGGER.debug("EVN request failed %s %s: HTTP %s %s", method, url, resp.status, text[:300])
+                    return None
+                try:
+                    return await resp.json(content_type=None)
+                except Exception:
+                    text = await resp.text()
+                    try:
+                        return json.loads(text)
+                    except Exception:
+                        return None
+        return None
+
     async def download_file(self, url: str) -> bytes | None:
-        """Download an invoice attachment using the active EVN session."""
+        """Download an official EVN invoice resource.
+
+        Regional APIs often return an opaque download/viewer URL rather than a
+        URL ending in ``.pdf`` or ``.png``.  The caller verifies file signatures;
+        here we follow EVN redirects and one level of HTML viewer links.  EVN
+        credentials are only attached to EVN-owned hosts.
+        """
         if not url:
             return None
-        if not url.lower().startswith(("http://", "https://")):
-            url = urljoin(f"{self.base_url}/", url.lstrip("/"))
-        session = await self._get_session()
-        headers = {"user-agent": "okhttp/4.12.0"}
-        if self.access_token:
-            headers["authorization"] = f"Bearer {self.access_token}"
-        if self.region == "HCMC" and self.hcmc_session:
-            headers["Cookie"] = f"evn_session={self.hcmc_session}"
-        try:
-            async with session.get(
-                url, headers=headers, timeout=self._timeout
-            ) as resp:
-                if resp.status != 200:
-                    _LOGGER.debug("Invoice download failed %s: HTTP %s", url, resp.status)
-                    return None
-                data = await resp.read()
-                return data if data else None
-        except Exception as err:
-            _LOGGER.debug("Invoice download failed %s: %s", url, err)
+        start_url = urljoin(f"{self.base_url}/", str(url).strip())
+        return await self._download_file_url(start_url, visited=set(), depth=0)
+
+    async def _download_file_url(
+        self, url: str, *, visited: set[str], depth: int
+    ) -> bytes | None:
+        if depth > 2 or url in visited:
             return None
+        visited.add(url)
+        session = await self._get_session()
+        headers = {
+            "user-agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 EVN-CSKH-Monitor/1.0",
+            "accept": "application/pdf,image/png,image/*,application/octet-stream,text/html;q=0.8,*/*;q=0.5",
+            "referer": f"{self.base_url}/",
+        }
+        host = (urlsplit(url).hostname or "").lower()
+        safe_auth_host = any(host == suffix.lstrip(".") or host.endswith(suffix) for suffix in _EVN_AUTH_SUFFIXES)
+        if safe_auth_host and self.access_token:
+            headers["authorization"] = f"Bearer {self.access_token}"
+        if safe_auth_host and self.region == "HCMC" and self.hcmc_session:
+            headers["Cookie"] = f"evn_session={self.hcmc_session}"
+
+        for attempt in range(2):
+            try:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    timeout=self._timeout,
+                    allow_redirects=False,
+                ) as resp:
+                    if resp.status in {301, 302, 303, 307, 308}:
+                        location = resp.headers.get("Location")
+                        if not location:
+                            return None
+                        redirected = urljoin(str(resp.url), location)
+                        # Re-enter the helper so Authorization/Cookie headers are
+                        # recalculated for the destination host. This prevents a
+                        # signed external invoice redirect from receiving EVN
+                        # credentials by accident.
+                        return await self._download_file_url(
+                            redirected, visited=visited, depth=depth
+                        )
+                    if resp.status in (401, 403) and attempt == 0 and safe_auth_host:
+                        if not await self.login():
+                            return None
+                        if self.access_token:
+                            headers["authorization"] = f"Bearer {self.access_token}"
+                        if self.region == "HCMC" and self.hcmc_session:
+                            headers["Cookie"] = f"evn_session={self.hcmc_session}"
+                        continue
+                    if resp.status != 200:
+                        _LOGGER.debug("Invoice download failed %s: HTTP %s", url, resp.status)
+                        return None
+                    # Cap invoice resources so a bad endpoint cannot consume
+                    # unbounded memory. EVN invoices are normally far below 20 MB.
+                    content_length = resp.content_length
+                    if content_length is not None and content_length > 20 * 1024 * 1024:
+                        _LOGGER.warning("Ignoring oversized EVN invoice resource: %s bytes", content_length)
+                        return None
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        total += len(chunk)
+                        if total > 20 * 1024 * 1024:
+                            _LOGGER.warning("Ignoring oversized EVN invoice stream from %s", url)
+                            return None
+                        chunks.append(chunk)
+                    data = b"".join(chunks)
+                    if not data:
+                        return None
+                    content_type = (resp.headers.get("Content-Type") or "").lower()
+                    stripped = data[:256].lstrip()
+                    if (
+                        "application/json" in content_type
+                        or stripped.startswith((b"{", b"["))
+                    ):
+                        try:
+                            envelope = json.loads(data.decode("utf-8", errors="replace"))
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            envelope = None
+                        if envelope is not None:
+                            for kind, candidate in iter_attachment_candidates(envelope):
+                                if kind == "base64":
+                                    embedded = decode_base64_payload(candidate)
+                                    if detect_invoice_type(embedded) is not None:
+                                        return embedded
+                                elif kind == "url":
+                                    nested_url = urljoin(str(resp.url), candidate)
+                                    nested = await self._download_file_url(
+                                        nested_url, visited=visited, depth=depth + 1
+                                    )
+                                    if nested:
+                                        return nested
+                    if "text/html" in content_type or stripped.lower().startswith((b"<!doctype html", b"<html")):
+                        for linked in extract_invoice_links_from_html(data, str(resp.url)):
+                            nested = await self._download_file_url(
+                                linked, visited=visited, depth=depth + 1
+                            )
+                            if nested:
+                                return nested
+                    return data
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                _LOGGER.debug("Invoice download failed %s: %s", url, err)
+                return None
+            except Exception as err:  # noqa: BLE001 - region servers vary widely
+                _LOGGER.debug("Invoice download failed %s: %s", url, err)
+                return None
+        return None
 
 def _optional_float(value: Any) -> float | None:
     """Parse a numeric API field without manufacturing a zero value."""

@@ -391,6 +391,42 @@ class EVNDatabase:
             )
             conn.commit()
 
+    def load_invoice_source_records(
+        self, customer_id: str, limit: int = 800
+    ) -> list[tuple[str, Any]]:
+        """Load stored bill/month/notification payloads for attachment recovery.
+
+        The raw table may contain many daily-history batches, so this query is
+        intentionally restricted to sources that can carry invoice resources.
+        Parsing is also kept here, off the Home Assistant event loop.
+        """
+        with _SQLITE_LOCK, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source, payload_json
+                FROM raw_server_records
+                WHERE customer_id=?
+                  AND (
+                    source='bill'
+                    OR source='notifications'
+                    OR source LIKE 'monthly_%'
+                    OR source LIKE 'history_month_%'
+                  )
+                ORDER BY fetched_at DESC
+                LIMIT ?
+                """,
+                (customer_id, max(1, min(int(limit), 2000))),
+            ).fetchall()
+
+        result: list[tuple[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            result.append((str(row["source"]), payload))
+        return result
+
     def get_state(self, customer_id: str, key: str) -> str | None:
         with _SQLITE_LOCK, self._connect() as conn:
             row = conn.execute(
