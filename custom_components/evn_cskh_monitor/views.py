@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
-from homeassistant.core import HomeAssistant
 from homeassistant.components.http import HomeAssistantView
+from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from .calculations import future_outages, parse_iso_date
@@ -18,17 +17,21 @@ from .const import (
     API_URL_PREFIX,
     CONF_CUSTOMER_ID,
     CONF_NGAYDAUKY,
+    CONF_WEBUI_SUBTITLE,
+    CONF_WEBUI_TITLE,
     DEFAULT_NGAYDAUKY,
+    DEFAULT_WEBUI_SUBTITLE,
+    DEFAULT_WEBUI_TITLE,
     DOMAIN,
     NAME,
 )
-
-_LOGGER = logging.getLogger(__name__)
+from .naming import device_display_name
 
 
 def _runtime_for_account(hass: HomeAssistant, account: str):
+    normalized = account.strip().upper()
     for entry in hass.config_entries.async_entries(DOMAIN):
-        if str(entry.data.get(CONF_CUSTOMER_ID, "")).strip().upper() != account.upper():
+        if str(entry.data.get(CONF_CUSTOMER_ID, "")).strip().upper() != normalized:
             continue
         runtime = getattr(entry, "runtime_data", None)
         if runtime is not None:
@@ -43,7 +46,11 @@ def _json_number(value: Any) -> float | None:
         return None
 
 
-def _invoice_files(data_dir: Path, customer_id: str, monthly: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _invoice_files(
+    data_dir: Path,
+    customer_id: str,
+    monthly: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
     for row in monthly:
         month = int(row.get("month") or 0)
@@ -52,20 +59,28 @@ def _invoice_files(data_dir: Path, customer_id: str, monthly: list[dict[str, Any
             continue
         for ext in ("pdf", "png"):
             path = data_dir / f"{customer_id}_{month}_{year}.{ext}"
-            if path.is_file():
-                stat = path.stat()
-                if stat.st_size <= 0:
-                    continue
-                files.append(
-                    {
-                        "month": month,
-                        "year": year,
-                        "type": ext,
-                        "name": path.name,
-                        "size": stat.st_size,
-                    }
-                )
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            if stat.st_size <= 0:
+                continue
+            files.append(
+                {
+                    "month": month,
+                    "year": year,
+                    "type": ext,
+                    "name": path.name,
+                    "size": stat.st_size,
+                }
+            )
+    files.sort(key=lambda item: (item["year"], item["month"], item["type"]), reverse=True)
     return files
+
+
+def _webui_settings(entry) -> tuple[str, str]:
+    title = str(entry.options.get(CONF_WEBUI_TITLE, DEFAULT_WEBUI_TITLE)).strip()
+    subtitle = str(entry.options.get(CONF_WEBUI_SUBTITLE, DEFAULT_WEBUI_SUBTITLE)).strip()
+    return title or DEFAULT_WEBUI_TITLE, subtitle
 
 
 class EVNPingView(HomeAssistantView):
@@ -84,19 +99,21 @@ class EVNOptionsView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass: HomeAssistant = request.app["hass"]
-        accounts = []
+        accounts: list[dict[str, Any]] = []
         for entry in hass.config_entries.async_entries(DOMAIN):
             customer_id = str(entry.data.get(CONF_CUSTOMER_ID, "")).strip().upper()
             if not customer_id:
                 continue
             runtime = getattr(entry, "runtime_data", None)
             customer = runtime.coordinator.data.get("customer", {}) if runtime else {}
+            webui_title, webui_subtitle = _webui_settings(entry)
             accounts.append(
                 {
                     "id": customer_id,
                     "customer_id": customer_id,
                     "userevn": customer_id,
-                    "name": customer.get("name") or f"EVN CSKH Monitor {customer_id}",
+                    "name": device_display_name(hass, entry, customer_id),
+                    "evn_customer_name": customer.get("name"),
                     "region": customer.get("region") or entry.data.get("region"),
                     "billing_start": int(
                         entry.options.get(
@@ -104,9 +121,18 @@ class EVNOptionsView(HomeAssistantView):
                             entry.data.get(CONF_NGAYDAUKY, DEFAULT_NGAYDAUKY),
                         )
                     ),
+                    "webui_title": webui_title,
+                    "webui_subtitle": webui_subtitle,
                 }
             )
-        return web.json_response({"accounts": accounts, "accounts_json": json.dumps(accounts, ensure_ascii=False)})
+        accounts.sort(key=lambda item: str(item["name"]).casefold())
+        return web.json_response(
+            {
+                "accounts": accounts,
+                # Kept for backwards compatibility with the prerelease WebUI.
+                "accounts_json": json.dumps(accounts, ensure_ascii=False),
+            }
+        )
 
 
 class EVNMonthlyDataView(HomeAssistantView):
@@ -155,20 +181,19 @@ class EVNDailyDataView(HomeAssistantView):
         _, runtime = _runtime_for_account(hass, account)
         if runtime is None:
             return web.json_response({"error": "account_not_found"}, status=404)
-        result = []
-        for row in runtime.coordinator.data.get("daily", []):
-            result.append(
+        return web.json_response(
+            [
                 {
                     "Ngày": row.get("date_display"),
                     "Ngày ISO": row.get("date"),
                     "Điện tiêu thụ (kWh)": _json_number(row.get("consumption")),
                     "CHISO": _json_number(row.get("reading")),
-                    # Daily money cannot be exact under tiered billing. Do not
-                    # invent a VND value here; official invoice money is monthly.
+                    # Tiered tariffs do not permit an exact per-day allocation.
                     "Tiền điện (VND)": None,
                 }
-            )
-        return web.json_response(result)
+                for row in runtime.coordinator.data.get("daily", [])
+            ]
+        )
 
 
 class EVNSummaryView(HomeAssistantView):
@@ -181,23 +206,48 @@ class EVNSummaryView(HomeAssistantView):
         entry, runtime = _runtime_for_account(hass, account)
         if runtime is None or entry is None:
             return web.json_response({"error": "account_not_found"}, status=404)
+
         snapshot = runtime.coordinator.data
+        customer = dict(snapshot.get("customer", {}))
+        webui_title, webui_subtitle = _webui_settings(entry)
+        customer.update(
+            {
+                "device_name": device_display_name(hass, entry, account),
+                "webui_title": webui_title,
+                "webui_subtitle": webui_subtitle,
+            }
+        )
+
         daily = list(snapshot.get("daily", []))
         monthly = list(snapshot.get("monthly", []))
-        valid_daily = [row for row in daily if row.get("consumption") is not None and parse_iso_date(row.get("date"))]
+        valid_daily = [
+            row
+            for row in daily
+            if row.get("consumption") is not None and parse_iso_date(row.get("date"))
+        ]
         total_kwh = sum(float(row["consumption"]) for row in valid_daily)
-        official = [row for row in monthly if row.get("cost") is not None and row.get("source") == "invoice"]
+        official = [
+            row
+            for row in monthly
+            if row.get("cost") is not None and row.get("source") == "invoice"
+        ]
         official_costs = [float(row["cost"]) for row in official]
-        dates = sorted(parse_iso_date(row.get("date")) for row in valid_daily)
-        dates = [item for item in dates if item is not None]
+        dates = sorted(
+            item
+            for item in (parse_iso_date(row.get("date")) for row in valid_daily)
+            if item is not None
+        )
         expected_days = (dates[-1] - dates[0]).days + 1 if dates else 0
         coverage = (len(valid_daily) / expected_days * 100) if expected_days else 0
         peak = max(valid_daily, key=lambda row: float(row["consumption"]), default=None)
         low = min(valid_daily, key=lambda row: float(row["consumption"]), default=None)
-        files = await hass.async_add_executor_job(_invoice_files, runtime.data_dir, account, monthly)
+        files = await hass.async_add_executor_job(
+            _invoice_files, runtime.data_dir, account, monthly
+        )
+
         return web.json_response(
             {
-                "customer": snapshot.get("customer", {}),
+                "customer": customer,
                 "last_sync": snapshot.get("last_sync"),
                 "partial_errors": snapshot.get("partial_errors", []),
                 "daily": {
@@ -208,14 +258,18 @@ class EVNSummaryView(HomeAssistantView):
                     "expected_days": expected_days,
                     "coverage_percent": round(coverage, 2),
                     "total_kwh": round(total_kwh, 3),
-                    "average_kwh": round(total_kwh / len(valid_daily), 3) if valid_daily else None,
+                    "average_kwh": (
+                        round(total_kwh / len(valid_daily), 3) if valid_daily else None
+                    ),
                     "peak": peak,
                     "lowest": low,
                 },
                 "monthly": {
                     "records": len(monthly),
                     "official_invoice_count": len(official),
-                    "official_cost_total": round(sum(official_costs), 2) if official_costs else None,
+                    "official_cost_total": (
+                        round(sum(official_costs), 2) if official_costs else None
+                    ),
                 },
                 "debt": snapshot.get("debt", {}),
                 "outage_count": len(snapshot.get("outages", [])),

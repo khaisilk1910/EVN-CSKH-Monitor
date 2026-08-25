@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import shutil
 from typing import Any
 
-from homeassistant.components import frontend
+from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -24,6 +25,8 @@ from .const import (
     NAME,
     PANEL_URL_PATH,
     PLATFORMS,
+    VERSION,
+    WEBUI_DIR_NAME,
     WEBUI_URL_PREFIX,
 )
 from .coordinator import EVNDataUpdateCoordinator
@@ -48,23 +51,62 @@ class EVNCSKHRuntimeData:
 type EVNCSKHConfigEntry = ConfigEntry[EVNCSKHRuntimeData]
 
 
+def _sync_webui_assets(source: Path, destination: Path, version: str) -> None:
+    """Copy packaged WebUI assets into /config/evncskh/webui when needed.
+
+    This runs in Home Assistant's executor. Only the dedicated webui subfolder
+    is later exposed by the static route, so the database, raw data and invoice
+    files in /config/evncskh are never made public by that route.
+    """
+    marker = destination / ".version"
+    if (
+        marker.is_file()
+        and marker.read_text(encoding="utf-8").strip() == version
+        and (destination / "panel.js").is_file()
+    ):
+        return
+
+    # Replace the generated WebUI directory on version changes instead of
+    # merging it. This removes stale prerelease assets (including the old
+    # iframe/token based frontend) and guarantees that /config/evncskh/webui
+    # exactly matches the integration version being executed.
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
+    marker.write_text(version, encoding="utf-8")
+
+
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
-    """Set up domain-level HTTP resources and the dashboard panel once."""
-    webui_path = Path(__file__).parent / "webui"
+    """Set up domain-level authenticated WebUI resources once."""
+    source_webui = Path(__file__).parent / "webui"
+    data_dir = Path(hass.config.path(DATA_DIR_NAME))
+    webui_dir = data_dir / WEBUI_DIR_NAME
+
+    # Keep all potentially blocking filesystem operations off the event loop.
+    await hass.async_add_executor_job(
+        _sync_webui_assets, source_webui, webui_dir, VERSION
+    )
+
     await hass.http.async_register_static_paths(
-        [StaticPathConfig(WEBUI_URL_PREFIX, str(webui_path), False)]
+        [StaticPathConfig(WEBUI_URL_PREFIX, str(webui_dir), False)]
     )
     async_register_views(hass)
 
+    # Use Home Assistant's custom-panel bridge instead of an ordinary iframe.
+    # The bridge passes the authenticated `hass` object to panel.js, allowing
+    # hass.callApi() to access our requires_auth=True endpoints without scraping
+    # tokens from browser storage.
     if not frontend.async_panel_exists(hass, PANEL_URL_PATH):
-        frontend.async_register_built_in_panel(
+        await panel_custom.async_register_panel(
             hass,
-            component_name="iframe",
+            frontend_url_path=PANEL_URL_PATH,
+            webcomponent_name="evn-cskh-monitor-panel",
+            module_url=f"{WEBUI_URL_PREFIX}/panel.js?v={VERSION}",
             sidebar_title=NAME,
             sidebar_icon="mdi:transmission-tower",
-            frontend_url_path=PANEL_URL_PATH,
-            config={"url": f"{WEBUI_URL_PREFIX}/index.html"},
+            embed_iframe=True,
             require_admin=False,
+            config={},
         )
     return True
 
@@ -98,17 +140,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> b
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # A background task explicitly does not hold Home Assistant startup. The
-    # coordinator still provides hourly updates after entities subscribe.
+    # The initial EVN refresh is detached from setup so a slow cloud cannot hold
+    # Home Assistant startup. A successful refresh schedules the historical
+    # bootstrap itself; this ordering ensures Zalo baseline seeding always sees
+    # the current bill/outage/daily snapshot before old history is imported.
     entry.async_create_background_task(
         hass,
         coordinator.async_refresh(),
         name=f"{DOMAIN} initial refresh {entry.entry_id}",
-    )
-    entry.async_create_background_task(
-        hass,
-        coordinator.async_backfill_history(),
-        name=f"{DOMAIN} history backfill {entry.entry_id}",
     )
     return True
 
@@ -124,5 +163,28 @@ async def async_unload_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> 
 async def _async_update_listener(
     hass: HomeAssistant, entry: EVNCSKHConfigEntry
 ) -> None:
-    """Reload once when options or connection data changes."""
-    await hass.config_entries.async_reload(entry.entry_id)
+    """Apply option changes cheaply and reload only connection changes.
+
+    Billing/Zalo/WebUI options are read dynamically, so reloading the whole
+    config entry would unnecessarily restart the EVN client and launch another
+    cloud refresh. Credential or region changes still require a full reload.
+    """
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None:
+        return
+
+    api = runtime.api
+    connection_changed = (
+        str(entry.data.get(CONF_REGION, "")) != api.region
+        or str(entry.data.get(CONF_USERNAME, "")) != api.username
+        or str(entry.data.get(CONF_PASSWORD, "")) != api.password
+        or str(entry.data.get(CONF_CUSTOMER_ID, "")).strip().upper()
+        != api.customer_id
+    )
+    if connection_changed:
+        await hass.config_entries.async_reload(entry.entry_id)
+        return
+
+    # Re-render cached sensors immediately for billing-period option changes.
+    # ZaloNotifier and WebUI endpoints read entry.options on demand as well.
+    runtime.coordinator.async_update_listeners()

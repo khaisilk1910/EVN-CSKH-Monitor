@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 import logging
 from typing import Any, override
+from uuid import uuid4
 
 import voluptuous as vol
 
@@ -15,12 +16,20 @@ from homeassistant.helpers import selector
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_CONFIRM_DELETE,
     CONF_CUSTOMER_ID,
     CONF_NGAYDAUKY,
     CONF_PASSWORD,
     CONF_REGION,
     CONF_USERNAME,
+    CONF_WEBUI_SUBTITLE,
+    CONF_WEBUI_TITLE,
     CONF_ZALO_ACCOUNT_SELECTION,
+    CONF_ZALO_ACTION,
+    CONF_ZALO_RECIPIENT_ENABLED,
+    CONF_ZALO_RECIPIENT_ID,
+    CONF_ZALO_RECIPIENT_NAME,
+    CONF_ZALO_RECIPIENTS,
     CONF_ZALO_SEND_DAILY,
     CONF_ZALO_SEND_INVOICE,
     CONF_ZALO_SEND_OUTAGE,
@@ -28,11 +37,11 @@ from .const import (
     CONF_ZALO_TYPE,
     CUSTOMER_ID_PREFIX_REGION,
     DEFAULT_NGAYDAUKY,
-    DEFAULT_ZALO_ACCOUNT_SELECTION,
+    DEFAULT_WEBUI_SUBTITLE,
+    DEFAULT_WEBUI_TITLE,
     DEFAULT_ZALO_SEND_DAILY,
     DEFAULT_ZALO_SEND_INVOICE,
     DEFAULT_ZALO_SEND_OUTAGE,
-    DEFAULT_ZALO_THREAD_ID,
     DEFAULT_ZALO_TYPE,
     DOMAIN,
     REGION_CPC,
@@ -42,6 +51,12 @@ from .const import (
     REGION_SPC,
 )
 from .evn_api import EVNAPI
+from .zalo_config import (
+    form_defaults,
+    normalize_zalo_recipients,
+    recipient_from_form,
+    without_legacy_zalo_options,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +70,11 @@ REGION_OPTIONS = [
 ZALO_TYPE_OPTIONS = [
     {"value": "0", "label": "0 - User"},
     {"value": "1", "label": "1 - Group"},
+]
+ZALO_ACTION_OPTIONS = [
+    {"value": "add", "label": "Thêm tài khoản / nơi nhận"},
+    {"value": "edit", "label": "Sửa tài khoản / nơi nhận"},
+    {"value": "delete", "label": "Xóa tài khoản / nơi nhận"},
 ]
 
 
@@ -86,6 +106,98 @@ def _account_schema(defaults: dict[str, Any]) -> vol.Schema:
             ): selector.TextSelector(selector.TextSelectorConfig()),
         }
     )
+
+
+def _general_options_schema(current: dict[str, Any], data: dict[str, Any]) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_NGAYDAUKY,
+                default=int(
+                    current.get(
+                        CONF_NGAYDAUKY,
+                        data.get(CONF_NGAYDAUKY, DEFAULT_NGAYDAUKY),
+                    )
+                ),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1,
+                    max=31,
+                    step=1,
+                    mode=selector.NumberSelectorMode.SLIDER,
+                )
+            ),
+            vol.Required(
+                CONF_WEBUI_TITLE,
+                default=str(current.get(CONF_WEBUI_TITLE, DEFAULT_WEBUI_TITLE)),
+            ): selector.TextSelector(selector.TextSelectorConfig()),
+            vol.Optional(
+                CONF_WEBUI_SUBTITLE,
+                default=str(current.get(CONF_WEBUI_SUBTITLE, DEFAULT_WEBUI_SUBTITLE)),
+            ): selector.TextSelector(selector.TextSelectorConfig()),
+        }
+    )
+
+
+def _zalo_recipient_schema(defaults: dict[str, Any]) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_ZALO_RECIPIENT_NAME,
+                default=str(defaults.get(CONF_ZALO_RECIPIENT_NAME, "Zalo")),
+            ): selector.TextSelector(selector.TextSelectorConfig()),
+            vol.Required(
+                CONF_ZALO_RECIPIENT_ENABLED,
+                default=bool(defaults.get(CONF_ZALO_RECIPIENT_ENABLED, True)),
+            ): selector.BooleanSelector(),
+            vol.Required(
+                CONF_ZALO_TYPE,
+                default=str(defaults.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=ZALO_TYPE_OPTIONS,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(
+                CONF_ZALO_ACCOUNT_SELECTION,
+                default=str(defaults.get(CONF_ZALO_ACCOUNT_SELECTION, "")),
+            ): selector.TextSelector(selector.TextSelectorConfig()),
+            vol.Required(
+                CONF_ZALO_THREAD_ID,
+                default=str(defaults.get(CONF_ZALO_THREAD_ID, "")),
+            ): selector.TextSelector(selector.TextSelectorConfig()),
+            vol.Required(
+                CONF_ZALO_SEND_INVOICE,
+                default=bool(
+                    defaults.get(CONF_ZALO_SEND_INVOICE, DEFAULT_ZALO_SEND_INVOICE)
+                ),
+            ): selector.BooleanSelector(),
+            vol.Required(
+                CONF_ZALO_SEND_DAILY,
+                default=bool(
+                    defaults.get(CONF_ZALO_SEND_DAILY, DEFAULT_ZALO_SEND_DAILY)
+                ),
+            ): selector.BooleanSelector(),
+            vol.Required(
+                CONF_ZALO_SEND_OUTAGE,
+                default=bool(
+                    defaults.get(CONF_ZALO_SEND_OUTAGE, DEFAULT_ZALO_SEND_OUTAGE)
+                ),
+            ): selector.BooleanSelector(),
+        }
+    )
+
+
+def _validate_zalo_form(user_input: dict[str, Any]) -> dict[str, str]:
+    errors: dict[str, str] = {}
+    if not str(user_input.get(CONF_ZALO_RECIPIENT_NAME, "")).strip():
+        errors[CONF_ZALO_RECIPIENT_NAME] = "required_value"
+    if not str(user_input.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip():
+        errors[CONF_ZALO_ACCOUNT_SELECTION] = "required_value"
+    if not str(user_input.get(CONF_ZALO_THREAD_ID, "")).strip():
+        errors[CONF_ZALO_THREAD_ID] = "required_value"
+    return errors
 
 
 class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -228,77 +340,188 @@ class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
-    """Options for billing-cycle calculations and Zalo Bot delivery."""
+    """Options for general settings and multiple Zalo destinations."""
+
+    def __init__(self) -> None:
+        self._selected_recipient_id: str | None = None
 
     @override
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
-
-        current = dict(self.config_entry.options)
-        data = self.config_entry.data
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_NGAYDAUKY,
-                    default=int(
-                        current.get(
-                            CONF_NGAYDAUKY,
-                            data.get(CONF_NGAYDAUKY, DEFAULT_NGAYDAUKY),
-                        )
-                    ),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=1,
-                        max=31,
-                        step=1,
-                        mode=selector.NumberSelectorMode.SLIDER,
-                    )
-                ),
-                vol.Required(
-                    CONF_ZALO_TYPE,
-                    default=str(current.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=ZALO_TYPE_OPTIONS,
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Optional(
-                    CONF_ZALO_ACCOUNT_SELECTION,
-                    default=str(
-                        current.get(
-                            CONF_ZALO_ACCOUNT_SELECTION,
-                            DEFAULT_ZALO_ACCOUNT_SELECTION,
-                        )
-                    ),
-                ): selector.TextSelector(selector.TextSelectorConfig()),
-                vol.Optional(
-                    CONF_ZALO_THREAD_ID,
-                    default=str(
-                        current.get(CONF_ZALO_THREAD_ID, DEFAULT_ZALO_THREAD_ID)
-                    ),
-                ): selector.TextSelector(selector.TextSelectorConfig()),
-                vol.Required(
-                    CONF_ZALO_SEND_INVOICE,
-                    default=bool(
-                        current.get(CONF_ZALO_SEND_INVOICE, DEFAULT_ZALO_SEND_INVOICE)
-                    ),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_ZALO_SEND_DAILY,
-                    default=bool(
-                        current.get(CONF_ZALO_SEND_DAILY, DEFAULT_ZALO_SEND_DAILY)
-                    ),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_ZALO_SEND_OUTAGE,
-                    default=bool(
-                        current.get(CONF_ZALO_SEND_OUTAGE, DEFAULT_ZALO_SEND_OUTAGE)
-                    ),
-                ): selector.BooleanSelector(),
-            }
+        """Show a small manager menu instead of one oversized form."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["general", "zalo_accounts"],
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+
+    async def async_step_general(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit billing-period and WebUI settings."""
+        current = dict(self.config_entry.options)
+        if user_input is not None:
+            merged = dict(current)
+            merged.update(user_input)
+            return self.async_create_entry(title="", data=merged)
+        return self.async_show_form(
+            step_id="general",
+            data_schema=_general_options_schema(current, dict(self.config_entry.data)),
+        )
+
+    async def async_step_zalo_accounts(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose add/edit/delete for one Zalo route."""
+        recipients = normalize_zalo_recipients(dict(self.config_entry.options))
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            action = str(user_input[CONF_ZALO_ACTION])
+            selected = str(user_input.get(CONF_ZALO_RECIPIENT_ID, "")).strip()
+            if action == "add":
+                return await self.async_step_zalo_add()
+            if not selected or not any(item["id"] == selected for item in recipients):
+                errors[CONF_ZALO_RECIPIENT_ID] = "select_recipient"
+            else:
+                self._selected_recipient_id = selected
+                if action == "edit":
+                    return await self.async_step_zalo_edit()
+                if action == "delete":
+                    return await self.async_step_zalo_delete()
+
+        schema_fields: dict[Any, Any] = {
+            vol.Required(CONF_ZALO_ACTION, default="add"): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=(ZALO_ACTION_OPTIONS if recipients else ZALO_ACTION_OPTIONS[:1]),
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+        }
+        if recipients:
+            options = [
+                {
+                    "value": item["id"],
+                    "label": f"{item['name']} · {'Group' if item['type'] == 1 else 'User'}",
+                }
+                for item in recipients
+            ]
+            schema_fields[
+                vol.Optional(CONF_ZALO_RECIPIENT_ID, default=recipients[0]["id"])
+            ] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=options,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+
+        names = ", ".join(item["name"] for item in recipients) or "Chưa có"
+        return self.async_show_form(
+            step_id="zalo_accounts",
+            data_schema=vol.Schema(schema_fields),
+            errors=errors,
+            description_placeholders={
+                "count": str(len(recipients)),
+                "accounts": names,
+            },
+        )
+
+    async def async_step_zalo_add(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Add one Zalo sender/destination pair."""
+        recipients = normalize_zalo_recipients(dict(self.config_entry.options))
+        defaults = {
+            CONF_ZALO_RECIPIENT_NAME: f"Zalo {len(recipients) + 1}",
+            CONF_ZALO_RECIPIENT_ENABLED: True,
+            CONF_ZALO_TYPE: str(DEFAULT_ZALO_TYPE),
+            CONF_ZALO_ACCOUNT_SELECTION: "",
+            CONF_ZALO_THREAD_ID: "",
+            CONF_ZALO_SEND_INVOICE: DEFAULT_ZALO_SEND_INVOICE,
+            CONF_ZALO_SEND_DAILY: DEFAULT_ZALO_SEND_DAILY,
+            CONF_ZALO_SEND_OUTAGE: DEFAULT_ZALO_SEND_OUTAGE,
+        }
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            errors = _validate_zalo_form(user_input)
+            if not errors:
+                recipient = recipient_from_form(
+                    user_input,
+                    uuid4().hex[:16],
+                    default_name=f"Zalo {len(recipients) + 1}",
+                )
+                recipients.append(recipient)
+                return self._save_recipients(recipients)
+            defaults.update(user_input)
+        return self.async_show_form(
+            step_id="zalo_add",
+            data_schema=_zalo_recipient_schema(defaults),
+            errors=errors,
+        )
+
+    async def async_step_zalo_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit one existing Zalo route without changing its dedupe identity."""
+        recipients = normalize_zalo_recipients(dict(self.config_entry.options))
+        selected = next(
+            (item for item in recipients if item["id"] == self._selected_recipient_id),
+            None,
+        )
+        if selected is None:
+            return await self.async_step_zalo_accounts()
+        defaults = form_defaults(selected)
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            errors = _validate_zalo_form(user_input)
+            if not errors:
+                replacement = recipient_from_form(
+                    user_input,
+                    selected["id"],
+                    default_name=selected["name"],
+                )
+                updated = [
+                    replacement if item["id"] == selected["id"] else item
+                    for item in recipients
+                ]
+                return self._save_recipients(updated)
+            defaults.update(user_input)
+        return self.async_show_form(
+            step_id="zalo_edit",
+            data_schema=_zalo_recipient_schema(defaults),
+            errors=errors,
+            description_placeholders={"name": selected["name"]},
+        )
+
+    async def async_step_zalo_delete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Delete one configured Zalo route with explicit confirmation."""
+        recipients = normalize_zalo_recipients(dict(self.config_entry.options))
+        selected = next(
+            (item for item in recipients if item["id"] == self._selected_recipient_id),
+            None,
+        )
+        if selected is None:
+            return await self.async_step_zalo_accounts()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if not bool(user_input.get(CONF_CONFIRM_DELETE, False)):
+                errors[CONF_CONFIRM_DELETE] = "confirm_delete"
+            else:
+                updated = [item for item in recipients if item["id"] != selected["id"]]
+                return self._save_recipients(updated)
+        return self.async_show_form(
+            step_id="zalo_delete",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_CONFIRM_DELETE, default=False): selector.BooleanSelector()
+                }
+            ),
+            errors=errors,
+            description_placeholders={"name": selected["name"]},
+        )
+
+    def _save_recipients(self, recipients: list[dict[str, Any]]) -> ConfigFlowResult:
+        options = without_legacy_zalo_options(dict(self.config_entry.options))
+        options[CONF_ZALO_RECIPIENTS] = recipients
+        return self.async_create_entry(title="", data=options)

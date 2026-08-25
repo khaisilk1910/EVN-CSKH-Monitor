@@ -191,9 +191,15 @@ class EVNDatabase:
                     customer_id, thang, nam, tien_dien, san_luong_kwh, source
                 ) VALUES (?, ?, ?, NULL, ?, 'daily_aggregate')
                 ON CONFLICT(customer_id, thang, nam) DO UPDATE SET
-                    san_luong_kwh=excluded.san_luong_kwh,
+                    san_luong_kwh=CASE
+                        WHEN monthly_bill.source IN ('invoice', 'monthly_api')
+                             AND monthly_bill.san_luong_kwh IS NOT NULL
+                            THEN monthly_bill.san_luong_kwh
+                        ELSE excluded.san_luong_kwh
+                    END,
                     source=CASE
-                        WHEN monthly_bill.source='invoice' THEN monthly_bill.source
+                        WHEN monthly_bill.source IN ('invoice', 'monthly_api')
+                            THEN monthly_bill.source
                         ELSE excluded.source
                     END
                 """,
@@ -228,19 +234,43 @@ class EVNDatabase:
             conn.commit()
 
     def save_bills(self, customer_id: str, bills: list[dict[str, Any]]) -> None:
+        """Persist official bills without inventing a zero debt value.
+
+        EVN occasionally returns an empty or partial bill list. In that case the
+        previous known debt must not be overwritten with 0. A zero is persisted
+        only when at least one valid bill row contains an explicit payment
+        status and none of those rows is marked unpaid.
+        """
         now = datetime.now().astimezone().isoformat()
         debt = 0.0
+        debt_known = False
         rows: list[tuple[Any, ...]] = []
         for bill in bills:
             month = _to_int(_first_value(bill, "THANG", "thang", "month"))
             year = _to_int(_first_value(bill, "NAM", "nam", "year"))
             if month is None or year is None:
                 continue
-            amount = _parse_number(_first_value(bill, "TONG_TIEN", "tong_tien", "TIEN_DIEN", "tien_dien"))
-            consumption = _parse_number(_first_value(bill, "DIEN_TTHU", "dien_tthu", "SAN_LUONG", "san_luong"))
-            status = str(_first_value(bill, "TTRANG_TTOAN", "trang_thai", "status") or "")
+            amount = _parse_number(
+                _first_value(bill, "TONG_TIEN", "tong_tien", "TIEN_DIEN", "tien_dien")
+            )
+            consumption = _parse_number(
+                _first_value(bill, "DIEN_TTHU", "dien_tthu", "SAN_LUONG", "san_luong")
+            )
+            status = str(
+                _first_value(bill, "TTRANG_TTOAN", "trang_thai", "status") or ""
+            ).strip()
             rows.append((customer_id, month, year, amount, consumption, status, "invoice"))
-            if status.upper() in {"CHUATT", "CHUA_TT", "UNPAID"} and amount:
+
+            normalized_status = status.upper().replace(" ", "").replace("-", "_")
+            if normalized_status:
+                debt_known = True
+            if normalized_status in {
+                "CHUATT",
+                "CHUA_TT",
+                "UNPAID",
+                "CHUATHANHTOAN",
+                "CHƯATHANHTOÁN",
+            } and amount is not None:
                 debt += amount
 
         with _SQLITE_LOCK, self._connect() as conn:
@@ -259,15 +289,16 @@ class EVNDatabase:
                     """,
                     rows,
                 )
-            conn.execute(
-                """
-                INSERT INTO debt(customer_id, amount, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(customer_id) DO UPDATE SET
-                    amount=excluded.amount, updated_at=excluded.updated_at
-                """,
-                (customer_id, debt, now),
-            )
+            if rows and debt_known:
+                conn.execute(
+                    """
+                    INSERT INTO debt(customer_id, amount, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(customer_id) DO UPDATE SET
+                        amount=excluded.amount, updated_at=excluded.updated_at
+                    """,
+                    (customer_id, debt, now),
+                )
             conn.commit()
 
     def save_outages(self, customer_id: str, outages: list[dict[str, Any]]) -> None:

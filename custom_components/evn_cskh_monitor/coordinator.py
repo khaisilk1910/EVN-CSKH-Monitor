@@ -17,10 +17,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    BACKFILL_DELAY_SECONDS,
-    BACKFILL_PAUSE_SECONDS,
     DAILY_BATCH_DAYS,
-    HISTORY_START_YEAR,
+    HISTORY_BATCH_PAUSE_SECONDS,
+    HISTORY_BOOTSTRAP_DELAY_SECONDS,
+    HISTORY_MONTH_PAUSE_SECONDS,
+    HISTORY_PREVIOUS_YEARS,
     RECENT_BOOTSTRAP_DAYS,
     REFRESH_WINDOW_DAYS,
     UPDATE_INTERVAL,
@@ -59,6 +60,8 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.cache_loaded = False
         self._api_lock = asyncio.Lock()
         self._backfill_lock = asyncio.Lock()
+        self._history_backfill_complete = False
+        self._zalo_baseline_ready = False
         self.zalo = ZaloNotifier(hass, entry, database, data_dir)
 
     async def async_initialize(self) -> None:
@@ -68,6 +71,16 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.database.load_snapshot, self.customer_id
         )
         self.data = self._decorate_snapshot(self.data)
+        bootstrap_year = await self.hass.async_add_executor_job(
+            self.database.get_state, self.customer_id, "history_bootstrap_year"
+        )
+        self._history_backfill_complete = bootstrap_year == str(dt_util.now().year)
+        self._zalo_baseline_ready = (
+            await self.hass.async_add_executor_job(
+                self.database.get_state, self.customer_id, "zalo_baseline_ready"
+            )
+            == "1"
+        )
         self.cache_loaded = True
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -150,16 +163,21 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # EVN snapshot becomes available immediately even if a third-party Zalo
         # service is slow or temporarily unavailable. Config-entry background
         # tasks are cancelled automatically on unload and do not block startup.
-        self.entry.async_create_background_task(
-            self.hass,
-            self._async_process_zalo(snapshot),
-            name=f"evn_cskh_monitor zalo {self.customer_id}",
-        )
-        self.entry.async_create_background_task(
-            self.hass,
-            self.async_backfill_history(),
-            name=f"evn_cskh_monitor history retry {self.customer_id}",
-        )
+        # Do not emit Zalo notifications while the initial historical import is
+        # running. The importer seeds all current fingerprints when it finishes,
+        # so old bills/outages/production are treated as baseline rather than new.
+        if self._zalo_baseline_ready:
+            self.entry.async_create_background_task(
+                self.hass,
+                self._async_process_zalo(snapshot),
+                name=f"evn_cskh_monitor zalo {self.customer_id}",
+            )
+        if not self._history_backfill_complete or not self._zalo_baseline_ready:
+            self.entry.async_create_background_task(
+                self.hass,
+                self.async_backfill_history(),
+                name=f"evn_cskh_monitor history retry {self.customer_id}",
+            )
 
         return snapshot
 
@@ -187,7 +205,9 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         last_saved = await self.hass.async_add_executor_job(
             self.database.get_last_daily_date, self.customer_id
         )
-        history_start = datetime(HISTORY_START_YEAR, 1, 1, tzinfo=now.tzinfo)
+        history_start = datetime(
+            now.year - HISTORY_PREVIOUS_YEARS, 1, 1, tzinfo=now.tzinfo
+        )
         if last_saved is not None:
             if now.tzinfo is not None and last_saved.tzinfo is None:
                 last_saved = last_saved.replace(tzinfo=now.tzinfo)
@@ -235,34 +255,147 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return received_response
 
     async def async_backfill_history(self) -> None:
-        """Run one background backfill worker at a time."""
+        """Run one background history worker and establish a no-send baseline."""
+        if self._history_backfill_complete:
+            if not self._zalo_baseline_ready:
+                await self._async_ensure_zalo_baseline()
+            return
         if self._backfill_lock.locked():
             return
         async with self._backfill_lock:
-            await self._async_backfill_history()
+            try:
+                await self._async_backfill_history()
+            except asyncio.CancelledError:
+                raise
+            else:
+                # Even if an upstream batch temporarily paused the importer, the
+                # initial current-state refresh has already populated recent data.
+                # Seed that snapshot so notifications can start without ever
+                # replaying the imported baseline. Older retries remain silent.
+                if not self._zalo_baseline_ready:
+                    await self._async_ensure_zalo_baseline()
+
+    async def _async_ensure_zalo_baseline(self) -> None:
+        """Seed all configured Zalo routes from the current local snapshot."""
+        snapshot = await self.hass.async_add_executor_job(
+            self.database.load_snapshot, self.customer_id
+        )
+        snapshot = self._decorate_snapshot(snapshot)
+        await self.zalo.async_seed_all(snapshot)
+        await self.hass.async_add_executor_job(
+            self.database.set_state,
+            self.customer_id,
+            "zalo_baseline_ready",
+            "1",
+        )
+        self._zalo_baseline_ready = True
 
     async def _async_backfill_history(self) -> None:
-        """Backfill older EVN history incrementally in the background.
+        """Load the previous calendar year and current year in the background.
 
-        A persistent cursor is advanced only after a server batch was received
-        and saved. Failed batches therefore cannot create silent holes or mark
-        an incomplete history as complete.
+        A new meter gets January..December of the previous year plus January
+        through the current date/year, when EVN has those records. Daily data is
+        downloaded in small batches with a persistent cursor. HN/NPC/CPC also
+        query the dedicated monthly endpoint because it can be more authoritative
+        than summing daily readings. HCMC/SPC monthly data is derived from the same
+        daily endpoint, so duplicate monthly network calls are intentionally
+        avoided. Historical batches never call Zalo; the current snapshot is
+        baseline-seeded before notification delivery is enabled.
         """
-        await asyncio.sleep(BACKFILL_DELAY_SECONDS)
-        complete = await self.hass.async_add_executor_job(
-            self.database.get_state, self.customer_id, "history_backfill_complete"
-        )
-        if complete == "1":
-            return
+        await asyncio.sleep(HISTORY_BOOTSTRAP_DELAY_SECONDS)
 
         now = dt_util.now()
-        history_start = datetime(HISTORY_START_YEAR, 1, 1, tzinfo=now.tzinfo)
-        recent_cutoff = now - timedelta(days=RECENT_BOOTSTRAP_DAYS + 1)
-        if recent_cutoff <= history_start:
+        target_year = now.year
+        completed_year = await self.hass.async_add_executor_job(
+            self.database.get_state, self.customer_id, "history_bootstrap_year"
+        )
+        if completed_year == str(target_year):
+            self._history_backfill_complete = True
             return
 
+        history_start = datetime(
+            target_year - HISTORY_PREVIOUS_YEARS, 1, 1, tzinfo=now.tzinfo
+        )
+        history_end = now
+        daily_cursor_key = f"history_daily_cursor_{target_year}"
+        monthly_done_key = f"history_monthly_done_{target_year}"
+
+        # Authenticate once before the slower import. Every API method still
+        # handles token expiry itself, and all cloud requests share _api_lock.
+        async with self._api_lock:
+            if not self.api.access_token and not await self.api.login():
+                _LOGGER.warning(
+                    "History bootstrap paused for %s: EVN login unavailable (%s)",
+                    self.customer_id,
+                    self.api.last_login_error or "unknown error",
+                )
+                return
+
+        monthly_done = await self.hass.async_add_executor_job(
+            self.database.get_state, self.customer_id, monthly_done_key
+        )
+        monthly_saved = 0
+        if monthly_done != "1" and self.api.region not in {"HCMC", "SPC"}:
+            _LOGGER.info(
+                "Loading monthly EVN history for %s from %s through %s/%s",
+                self.customer_id,
+                history_start.year,
+                now.month,
+                now.year,
+            )
+            month_errors: list[str] = []
+            for year in range(history_start.year, target_year + 1):
+                last_month = now.month if year == target_year else 12
+                for month in range(1, last_month + 1):
+                    try:
+                        async with self._api_lock:
+                            result = await self.api.get_chisothang(month, year)
+                        if self.api.last_login_auth_failed:
+                            _LOGGER.warning(
+                                "History bootstrap stopped for %s because EVN authentication expired",
+                                self.customer_id,
+                            )
+                            return
+                        if result is None:
+                            # Some regions return no result for months without data.
+                            # Daily history below can still reconstruct consumption.
+                            _LOGGER.debug(
+                                "No monthly EVN response for %s %02d/%s",
+                                self.customer_id,
+                                month,
+                                year,
+                            )
+                        else:
+                            before = len(month_errors)
+                            await self._async_process_monthly_result(
+                                f"history_month_{year}{month:02d}",
+                                result,
+                                month,
+                                year,
+                                month_errors,
+                            )
+                            if len(month_errors) == before:
+                                monthly_saved += 1
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "Monthly history %02d/%s failed for %s: %s",
+                            month,
+                            year,
+                            self.customer_id,
+                            err,
+                        )
+                    await asyncio.sleep(HISTORY_MONTH_PAUSE_SECONDS)
+            await self.hass.async_add_executor_job(
+                self.database.set_state,
+                self.customer_id,
+                monthly_done_key,
+                "1",
+            )
+
         cursor = await self.hass.async_add_executor_job(
-            self.database.get_state, self.customer_id, "history_backfill_cursor"
+            self.database.get_state, self.customer_id, daily_cursor_key
         )
         current_start = history_start
         if cursor:
@@ -273,7 +406,10 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     datetime.min.time(),
                     tzinfo=now.tzinfo,
                 )
-                current_start = max(history_start, candidate)
+                if cursor_date >= history_end.date():
+                    current_start = history_end + timedelta(days=1)
+                elif history_start.date() <= candidate.date() <= history_end.date():
+                    current_start = candidate
             except ValueError:
                 _LOGGER.warning(
                     "Ignoring invalid history cursor for %s: %s",
@@ -282,44 +418,39 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
 
         _LOGGER.info(
-            "Starting background EVN history backfill for %s from %s",
+            "Loading daily EVN history for %s from %s through %s",
             self.customer_id,
             current_start.date(),
+            history_end.date(),
         )
         saved = 0
-        while current_start.date() <= recent_cutoff.date():
+        while current_start.date() <= history_end.date():
             current_end = min(
-                current_start + timedelta(days=DAILY_BATCH_DAYS - 1), recent_cutoff
+                current_start + timedelta(days=DAILY_BATCH_DAYS - 1), history_end
             )
             try:
+                # Include the previous day in each historical request. Some EVN
+                # regions expose only cumulative meter readings; the overlap lets
+                # _build_daily_rows calculate the first day's delta in every batch
+                # without creating a missing-consumption gap at batch boundaries.
+                request_start = current_start - timedelta(days=1)
                 async with self._api_lock:
-                    if not self.api.access_token and not await self.api.login():
-                        if self.api.last_login_auth_failed:
-                            _LOGGER.warning(
-                                "Stopping history backfill for %s because EVN authentication failed",
-                                self.customer_id,
-                            )
-                        else:
-                            _LOGGER.warning(
-                                "Pausing history backfill for %s because EVN login is unavailable: %s",
-                                self.customer_id,
-                                self.api.last_login_error or "unknown error",
-                            )
-                        return
                     response = await self.api.get_chisongay(
-                        current_start.strftime("%d/%m/%Y"),
+                        request_start.strftime("%d/%m/%Y"),
                         current_end.strftime("%d/%m/%Y"),
                     )
 
                 if self.api.last_login_auth_failed:
                     _LOGGER.warning(
-                        "Stopping history backfill for %s because EVN authentication expired",
+                        "History bootstrap stopped for %s because EVN authentication expired",
                         self.customer_id,
                     )
                     return
                 if response is None:
+                    # Do not advance the cursor on a transport/server failure. The
+                    # next scheduled refresh/startup can resume without a data hole.
                     _LOGGER.warning(
-                        "Pausing history backfill for %s: no response for %s..%s",
+                        "History bootstrap paused for %s: no response for %s..%s",
                         self.customer_id,
                         current_start.date(),
                         current_end.date(),
@@ -335,24 +466,34 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     parsed = self._build_daily_rows(
                         [item for item in payload if isinstance(item, dict)]
                     )
+                    # Keep the overlap row only as a calculation aid; persist the
+                    # intended batch window so the history range stays exact.
+                    parsed = [
+                        row
+                        for row in parsed
+                        if current_start.date()
+                        <= datetime.strptime(row[0], "%d-%m-%Y").date()
+                        <= current_end.date()
+                    ]
                     if parsed:
                         await self.hass.async_add_executor_job(
                             self.database.save_daily_records, self.customer_id, parsed
                         )
                         saved += len(parsed)
 
-                # Advance only after the complete server response has been persisted.
+                # An empty but valid server response still advances the cursor:
+                # it means EVN has no data for that batch.
                 await self.hass.async_add_executor_job(
                     self.database.set_state,
                     self.customer_id,
-                    "history_backfill_cursor",
+                    daily_cursor_key,
                     current_end.date().isoformat(),
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning(
-                    "Pausing history backfill batch %s..%s for %s after error: %s",
+                    "History bootstrap batch %s..%s paused for %s after error: %s",
                     current_start.date(),
                     current_end.date(),
                     self.customer_id,
@@ -361,26 +502,45 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
 
             current_start = current_end + timedelta(days=1)
-            await asyncio.sleep(BACKFILL_PAUSE_SECONDS)
+            await asyncio.sleep(HISTORY_BATCH_PAUSE_SECONDS)
 
         await self.hass.async_add_executor_job(
             self.database.aggregate_monthly_from_daily, self.customer_id
         )
-        await self.hass.async_add_executor_job(
-            self.database.set_state,
-            self.customer_id,
-            "history_backfill_complete",
-            "1",
-        )
+        if self.api.region in {"HCMC", "SPC"}:
+            await self.hass.async_add_executor_job(
+                self.database.set_state, self.customer_id, monthly_done_key, "1"
+            )
+
         snapshot = await self.hass.async_add_executor_job(
             self.database.load_snapshot, self.customer_id
         )
         snapshot = self._decorate_snapshot(snapshot)
+
+        # Seed all currently known data BEFORE marking the import complete. This
+        # guarantees the historical import itself never emits Zalo messages.
+        if not self._zalo_baseline_ready:
+            await self.zalo.async_seed_all(snapshot)
+            await self.hass.async_add_executor_job(
+                self.database.set_state,
+                self.customer_id,
+                "zalo_baseline_ready",
+                "1",
+            )
+            self._zalo_baseline_ready = True
+        await self.hass.async_add_executor_job(
+            self.database.set_state,
+            self.customer_id,
+            "history_bootstrap_year",
+            str(target_year),
+        )
+        self._history_backfill_complete = True
         self.async_set_updated_data(snapshot)
         _LOGGER.info(
-            "Completed background EVN history backfill for %s (%s parsed rows)",
+            "Completed EVN history bootstrap for %s (%s daily rows, %s monthly responses)",
             self.customer_id,
             saved,
+            monthly_saved,
         )
 
     async def _async_process_monthly_result(

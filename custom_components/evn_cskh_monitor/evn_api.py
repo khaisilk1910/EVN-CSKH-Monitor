@@ -1,10 +1,14 @@
 """Async API client for EVN CSKH Monitor."""
 
 import asyncio
-import logging
-import aiohttp
+from calendar import monthrange
+from datetime import date, datetime, timedelta
 import json
+import logging
 from typing import Any, Dict, Optional
+from urllib.parse import urljoin
+
+import aiohttp
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -719,7 +723,6 @@ class EVNAPI:
             
             # SPC dùng endpoint và format riêng
             elif self.region == "SPC":
-                from datetime import datetime, timedelta
                 # Convert dd/mm/yyyy to YYYYMMDD format (như nestup_evn: from_date - 1 ngày)
                 from_date_obj = datetime.strptime(from_date, "%d/%m/%Y") - timedelta(days=1)
                 to_date_obj = datetime.strptime(to_date, "%d/%m/%Y")
@@ -835,8 +838,6 @@ class EVNAPI:
         try:
             # HCMC và SPC tính từ dữ liệu ngày (như nestup_evn)
             if self.region == "HCMC" or self.region == "SPC":
-                from datetime import datetime, timedelta
-                from calendar import monthrange
                 
                 # Lấy dữ liệu ngày cho cả tháng
                 month_start = datetime(year, month, 1)
@@ -861,38 +862,117 @@ class EVNAPI:
                     _LOGGER.error(f"get_chisothang: No daily records for {self.region}")
                     return None
                 
-                # Tính chỉ số tháng
+                # Tính sản lượng tháng từ trường sản lượng ngày khi EVN cung
+                # cấp. Đây là nguồn trực tiếp hơn so với tự suy ra bằng hiệu hai
+                # chỉ số và tránh thiếu kWh nếu response không có ngày cuối tháng
+                # trước. Bản ghi cùng ngày được khử trùng lặp.
+                records = sorted(records, key=_daily_record_sort_key)
                 first_record = records[0]
                 last_record = records[-1]
-                
-                # HCMC dùng CHISO_MOI, SPC dùng dGiaoBT
-                if self.region == "HCMC":
-                    chi_so_cu = float(first_record.get("CHISO_MOI", 0) or first_record.get("CHISO", 0))
-                    chi_so_moi = float(last_record.get("CHISO_MOI", 0) or last_record.get("CHISO", 0))
-                    chi_so_thang = round(chi_so_moi - chi_so_cu, 2)
-                    
-                    # Parse ngày từ response HCMC
-                    ngay_dau = first_record.get("NGAY", first_record.get("ngayFull", ""))
-                    ngay_cuoi = last_record.get("NGAY", last_record.get("ngayFull", ""))
-                    if ngay_dau:
-                        from_date_parsed = datetime.strptime(ngay_dau, "%d/%m/%Y") + timedelta(days=1)
+                daily_values: dict[date, float] = {}
+                for record in records:
+                    record_date = _daily_record_date(record)
+                    if (
+                        record_date is None
+                        or record_date.year != year
+                        or record_date.month != month
+                    ):
+                        continue
+                    raw_consumption = next(
+                        (
+                            record.get(key)
+                            for key in (
+                                "DIEN_TIEU_THU",
+                                "SAN_LUONG",
+                                "dSanLuongBT",
+                                "Tong",
+                            )
+                            if record.get(key) is not None
+                        ),
+                        None,
+                    )
+                    consumption = _optional_float(raw_consumption)
+                    if consumption is not None and consumption >= 0:
+                        daily_values[record_date.date()] = consumption
+
+                if daily_values:
+                    chi_so_thang = round(sum(daily_values.values()), 6)
+                    first_day = min(daily_values)
+                    last_day = max(daily_values)
+                    from_date_parsed = datetime.combine(first_day, datetime.min.time())
+                    to_date_parsed = datetime.combine(last_day, datetime.min.time())
+                    if self.region == "HCMC":
+                        chi_so_cu = _optional_float(
+                            first_record.get("CHISO_MOI")
+                            if first_record.get("CHISO_MOI") is not None
+                            else first_record.get("CHISO")
+                        )
+                        chi_so_moi = _optional_float(
+                            last_record.get("CHISO_MOI")
+                            if last_record.get("CHISO_MOI") is not None
+                            else last_record.get("CHISO")
+                        )
                     else:
-                        from_date_parsed = month_start
-                    if ngay_cuoi:
-                        to_date_parsed = datetime.strptime(ngay_cuoi, "%d/%m/%Y")
-                    else:
-                        to_date_parsed = month_end
-                else:  # SPC
-                    d_giao_bt_old = float(first_record.get("dGiaoBT", 0))
-                    d_giao_bt_new = float(last_record.get("dGiaoBT", 0))
-                    chi_so_thang = round(d_giao_bt_new - d_giao_bt_old, 2)
+                        chi_so_cu = _optional_float(first_record.get("dGiaoBT"))
+                        chi_so_moi = _optional_float(last_record.get("dGiaoBT"))
+                # Fallback: only derive from meter readings when direct daily
+                # consumption is genuinely absent. Missing readings return None
+                # rather than manufacturing a 0 kWh month.
+                elif self.region == "HCMC":
+                    chi_so_cu = _optional_float(
+                        first_record.get("CHISO_MOI")
+                        if first_record.get("CHISO_MOI") is not None
+                        else first_record.get("CHISO")
+                    )
+                    chi_so_moi = _optional_float(
+                        last_record.get("CHISO_MOI")
+                        if last_record.get("CHISO_MOI") is not None
+                        else last_record.get("CHISO")
+                    )
+                    if chi_so_cu is None or chi_so_moi is None or chi_so_moi < chi_so_cu:
+                        _LOGGER.warning(
+                            "get_chisothang: invalid/missing HCMC meter readings for %s/%s",
+                            month,
+                            year,
+                        )
+                        return None
+                    chi_so_thang = round(chi_so_moi - chi_so_cu, 6)
+                    ngay_dau = first_record.get("NGAY") or first_record.get("ngayFull")
+                    ngay_cuoi = last_record.get("NGAY") or last_record.get("ngayFull")
+                    from_date_parsed = (
+                        datetime.strptime(str(ngay_dau), "%d/%m/%Y") + timedelta(days=1)
+                        if ngay_dau
+                        else month_start
+                    )
+                    to_date_parsed = (
+                        datetime.strptime(str(ngay_cuoi), "%d/%m/%Y")
+                        if ngay_cuoi
+                        else month_end
+                    )
+                else:  # SPC fallback
+                    d_giao_bt_old = _optional_float(first_record.get("dGiaoBT"))
+                    d_giao_bt_new = _optional_float(last_record.get("dGiaoBT"))
+                    if (
+                        d_giao_bt_old is None
+                        or d_giao_bt_new is None
+                        or d_giao_bt_new < d_giao_bt_old
+                    ):
+                        _LOGGER.warning(
+                            "get_chisothang: invalid/missing SPC meter readings for %s/%s",
+                            month,
+                            year,
+                        )
+                        return None
+                    chi_so_thang = round(d_giao_bt_new - d_giao_bt_old, 6)
                     chi_so_cu = d_giao_bt_old
                     chi_so_moi = d_giao_bt_new
-                    
-                    # Parse ngày từ response SPC
-                    from_date_parsed = datetime.strptime(first_record.get("strTime", ""), "%d/%m/%Y") + timedelta(days=1)
-                    to_date_parsed = datetime.strptime(last_record.get("strTime", ""), "%d/%m/%Y")
-                
+                    first_date = _daily_record_date(first_record)
+                    last_date = _daily_record_date(last_record)
+                    if first_date is None or last_date is None:
+                        return None
+                    from_date_parsed = first_date + timedelta(days=1)
+                    to_date_parsed = last_date
+
                 # Trả về đúng format của API chisothang chung: data là list
                 # bản ghi với các key CHISO_CU / CHISO_MOI / DIEN_TTHU,
                 # vì coordinator._save_monthly_data đọc theo format đó.
@@ -1271,8 +1351,6 @@ class EVNAPI:
             return None
     async def download_file(self, url: str) -> bytes | None:
         """Download an invoice attachment using the active EVN session."""
-        from urllib.parse import urljoin
-
         if not url:
             return None
         if not url.lower().startswith(("http://", "https://")):
@@ -1295,4 +1373,50 @@ class EVNAPI:
         except Exception as err:
             _LOGGER.debug("Invoice download failed %s: %s", url, err)
             return None
+
+def _optional_float(value: Any) -> float | None:
+    """Parse a numeric API field without manufacturing a zero value."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(" ", "")
+    if not text:
+        return None
+    # EVN meter readings are normally integers/decimals; commas are commonly
+    # thousands separators in the regional responses handled here.
+    if "," in text and "." not in text:
+        text = text.replace(",", "")
+    elif "," in text and "." in text:
+        text = text.replace(",", "")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _daily_record_date(record: Any) -> datetime | None:
+    """Parse the date from an HCMC/SPC standardized daily record."""
+    if not isinstance(record, dict):
+        return None
+    for key in ("NGAY", "ngayFull", "strTime"):
+        raw = record.get(key)
+        if not raw:
+            continue
+        text = str(raw).strip()
+        # Some SPC records represent a range; attribute the aggregate to the
+        # range end, matching the normalization used by the coordinator.
+        if text.count("/") == 4 and "-" in text:
+            text = text.rsplit("-", 1)[-1].strip()
+        try:
+            return datetime.strptime(text, "%d/%m/%Y")
+        except ValueError:
+            continue
+    return None
+
+
+def _daily_record_sort_key(record: Any) -> tuple[int, datetime]:
+    """Sort HCMC/SPC daily records chronologically when a date is present."""
+    parsed = _daily_record_date(record)
+    return (0, parsed) if parsed is not None else (1, datetime.max)
 

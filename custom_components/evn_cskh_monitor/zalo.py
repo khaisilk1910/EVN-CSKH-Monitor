@@ -21,26 +21,17 @@ from .calculations import (
     period_consumption,
     period_cost,
 )
-from .const import (
-    CONF_CUSTOMER_ID,
-    CONF_NGAYDAUKY,
-    CONF_ZALO_ACCOUNT_SELECTION,
-    CONF_ZALO_SEND_DAILY,
-    CONF_ZALO_SEND_INVOICE,
-    CONF_ZALO_SEND_OUTAGE,
-    CONF_ZALO_THREAD_ID,
-    CONF_ZALO_TYPE,
-    DEFAULT_NGAYDAUKY,
-    DEFAULT_ZALO_TYPE,
-)
+from .const import CONF_CUSTOMER_ID, CONF_NGAYDAUKY, DEFAULT_NGAYDAUKY
 from .database import EVNDatabase
+from .naming import device_display_name
+from .zalo_config import normalize_zalo_recipients
 
 _LOGGER = logging.getLogger(__name__)
 ZALO_DOMAIN = "zalo_bot"
 
 
 class ZaloNotifier:
-    """Send deduplicated Zalo notifications without blocking HA startup."""
+    """Send deduplicated notifications to any number of Zalo destinations."""
 
     def __init__(
         self,
@@ -60,32 +51,58 @@ class ZaloNotifier:
     def _options(self) -> dict[str, Any]:
         return dict(self.entry.options)
 
-    def _configured(self) -> bool:
-        options = self._options
-        return bool(
-            str(options.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip()
-            and str(options.get(CONF_ZALO_THREAD_ID, "")).strip()
-        )
+    def _recipients(self) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in normalize_zalo_recipients(self._options)
+            if item.get("enabled", True)
+        ]
 
-    def _base_data(self) -> dict[str, Any]:
-        options = self._options
+    @staticmethod
+    def _base_data(recipient: dict[str, Any]) -> dict[str, Any]:
         return {
-            "type": int(options.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)),
-            "account_selection": str(options.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip(),
-            "thread_id": str(options.get(CONF_ZALO_THREAD_ID, "")).strip(),
+            "type": int(recipient["type"]),
+            "account_selection": str(recipient["account_selection"]),
+            "thread_id": str(recipient["thread_id"]),
         }
+
+    def _display_name(self) -> str:
+        """Return the latest user-visible Home Assistant device name."""
+        return device_display_name(self.hass, self.entry, self.customer_id)
+
+    async def async_seed_all(self, snapshot: dict[str, Any]) -> None:
+        """Mark the current snapshot as seen without sending any Zalo message.
+
+        This is used after the initial historical import, and also guarantees a
+        newly configured destination never receives a flood of old invoices,
+        old outages, or yesterday's already-known production value.
+        """
+        recipients = self._recipients()
+        if not recipients:
+            return
+        async with self._process_lock:
+            for recipient in recipients:
+                await self._async_seed_recipient(recipient, snapshot, force=True)
 
     async def async_process(self, snapshot: dict[str, Any]) -> None:
         """Process enabled notification types without overlapping service calls."""
-        if not self._configured():
+        recipients = self._recipients()
+        if not recipients:
             return
         async with self._process_lock:
-            if self._options.get(CONF_ZALO_SEND_INVOICE, False):
-                await self._async_send_invoice_files(snapshot)
-            if self._options.get(CONF_ZALO_SEND_DAILY, False):
-                await self._async_send_daily(snapshot)
-            if self._options.get(CONF_ZALO_SEND_OUTAGE, False):
-                await self._async_send_outage(snapshot)
+            for recipient in recipients:
+                initialized = await self._async_seed_recipient(
+                    recipient, snapshot, force=False
+                )
+                if not initialized:
+                    # First observation is baseline-only by design.
+                    continue
+                if recipient.get("send_invoice", False):
+                    await self._async_send_invoice_files(recipient, snapshot)
+                if recipient.get("send_daily", False):
+                    await self._async_send_daily(recipient, snapshot)
+                if recipient.get("send_outage", False):
+                    await self._async_send_outage(recipient, snapshot)
 
     async def _async_service_call(self, service: str, data: dict[str, Any]) -> bool:
         if not self.hass.services.has_service(ZALO_DOMAIN, service):
@@ -100,6 +117,8 @@ class ZaloNotifier:
                     blocking=True,
                 )
             return True
+        except asyncio.CancelledError:
+            raise
         except Exception as err:  # noqa: BLE001 - third-party service errors vary
             _LOGGER.warning("Could not call %s.%s: %s", ZALO_DOMAIN, service, err)
             return False
@@ -114,35 +133,81 @@ class ZaloNotifier:
             self.database.set_state, self.customer_id, key, value
         )
 
-    async def _async_send_invoice_files(self, snapshot: dict[str, Any]) -> None:
+    @staticmethod
+    def _recipient_key(recipient: dict[str, Any], suffix: str) -> str:
+        recipient_id = str(recipient["id"])
+        return f"zalo_{recipient_id}_{suffix}"
+
+    async def _async_seed_recipient(
+        self,
+        recipient: dict[str, Any],
+        snapshot: dict[str, Any],
+        *,
+        force: bool,
+    ) -> bool:
+        """Seed dedupe state; return True only if it had already been initialized."""
+        init_key = self._recipient_key(recipient, "initialized")
+        already_initialized = await self._get_state(init_key) == "1"
+        if already_initialized and not force:
+            return True
+
         files = await self.hass.async_add_executor_job(self._scan_invoice_files, snapshot)
         for kind, month, year, path in files:
-            key = f"zalo_invoice_{kind}_{month}_{year}"
+            fingerprint = await self.hass.async_add_executor_job(_file_fingerprint, path)
+            await self._set_state(
+                self._recipient_key(recipient, f"invoice_{kind}_{month}_{year}"),
+                fingerprint,
+            )
+
+        daily_fingerprint = self._daily_fingerprint(snapshot)
+        if daily_fingerprint is not None:
+            await self._set_state(
+                self._recipient_key(recipient, "daily"), daily_fingerprint
+            )
+
+        outage_fingerprint = self._outage_fingerprint(snapshot)
+        if outage_fingerprint is not None:
+            await self._set_state(
+                self._recipient_key(recipient, "outage"), outage_fingerprint
+            )
+
+        await self._set_state(init_key, "1")
+        return already_initialized
+
+    async def _async_send_invoice_files(
+        self, recipient: dict[str, Any], snapshot: dict[str, Any]
+    ) -> None:
+        files = await self.hass.async_add_executor_job(self._scan_invoice_files, snapshot)
+        for kind, month, year, path in files:
+            key = self._recipient_key(recipient, f"invoice_{kind}_{month}_{year}")
             fingerprint = await self.hass.async_add_executor_job(_file_fingerprint, path)
             if await self._get_state(key) == fingerprint:
                 continue
 
             if kind == "png":
                 data = {
-                    **self._base_data(),
+                    **self._base_data(recipient),
                     "image_path": str(path),
-                    "message": f"Hóa đơn tháng {month}/{year} của công tơ {self.customer_id}",
+                    "message": f"Hóa đơn tháng {month}/{year} của {self._display_name()}",
                 }
                 success = await self._async_service_call("send_image", data)
             else:
                 data = {
-                    **self._base_data(),
+                    **self._base_data(recipient),
                     "file_path_or_url": str(path),
-                    "message": f"Chi tiết tiền điện tháng {month}/{year} công tơ {self.customer_id}",
+                    "message": f"Chi tiết tiền điện tháng {month}/{year} của {self._display_name()}",
                 }
                 success = await self._async_service_call("send_file", data)
 
             if success:
                 await self._set_state(key, fingerprint)
 
-    def _scan_invoice_files(self, snapshot: dict[str, Any]) -> list[tuple[str, int, int, Path]]:
+    def _scan_invoice_files(
+        self, snapshot: dict[str, Any]
+    ) -> list[tuple[str, int, int, Path]]:
         found: list[tuple[str, int, int, Path]] = []
-        # Newest first so recent invoices are sent before historical files.
+        # Newest first so a genuinely new invoice is delivered before older
+        # changed files. Baseline seeding prevents historical floods.
         months = sorted(
             snapshot.get("monthly", []),
             key=lambda row: (int(row.get("year") or 0), int(row.get("month") or 0)),
@@ -159,7 +224,30 @@ class ZaloNotifier:
                     found.append((kind, month, year, path))
         return found
 
-    async def _async_send_daily(self, snapshot: dict[str, Any]) -> None:
+    @staticmethod
+    def _daily_fingerprint(snapshot: dict[str, Any]) -> str | None:
+        now = dt_util.now()
+        yesterday = now.date() - timedelta(days=1)
+        value = consumption_on(snapshot, yesterday)
+        if value is None:
+            return None
+        return f"{yesterday.isoformat()}:{round(value, 3)}"
+
+    @staticmethod
+    def _outage_fingerprint(snapshot: dict[str, Any]) -> str | None:
+        events = future_outages(snapshot, dt_util.now().date())
+        if not events:
+            return None
+        event = events[0]
+        raw = "|".join(
+            str(event.get(key) or "")
+            for key in ("start_date", "start_time", "end_time", "area", "reason")
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    async def _async_send_daily(
+        self, recipient: dict[str, Any], snapshot: dict[str, Any]
+    ) -> None:
         now = dt_util.now()
         yesterday = now.date() - timedelta(days=1)
         yesterday_value = consumption_on(snapshot, yesterday)
@@ -167,7 +255,8 @@ class ZaloNotifier:
             return
 
         fingerprint = f"{yesterday.isoformat()}:{round(yesterday_value, 3)}"
-        if await self._get_state("zalo_daily") == fingerprint:
+        key = self._recipient_key(recipient, "daily")
+        if await self._get_state(key) == fingerprint:
             return
 
         day_before = yesterday - timedelta(days=1)
@@ -195,7 +284,7 @@ class ZaloNotifier:
         )
 
         message = (
-            f"🚨 Công tơ {self.customer_id}:\n\n"
+            f"🚨 {self._display_name()}:\n\n"
             f"📈 Sản lượng hôm qua: {_format_kwh(yesterday_value)}.\n"
             f"📈 Sản lượng hôm kia: {_format_kwh(day_before_value)}.\n\n"
             "━━━━━━━━━━━━\n"
@@ -210,36 +299,37 @@ class ZaloNotifier:
             f"🕒 {now.strftime('%H:%M:%S %A %d-%b-%Y')}."
         )
         success = await self._async_service_call(
-            "send_message", {**self._base_data(), "message": message}
+            "send_message", {**self._base_data(recipient), "message": message}
         )
         if success:
-            await self._set_state("zalo_daily", fingerprint)
+            await self._set_state(key, fingerprint)
 
-    async def _async_send_outage(self, snapshot: dict[str, Any]) -> None:
+    async def _async_send_outage(
+        self, recipient: dict[str, Any], snapshot: dict[str, Any]
+    ) -> None:
         events = future_outages(snapshot, dt_util.now().date())
         if not events:
             return
         event = events[0]
-        raw = "|".join(
-            str(event.get(key) or "")
-            for key in ("start_date", "start_time", "end_time", "area", "reason")
-        )
-        fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        if await self._get_state("zalo_outage") == fingerprint:
+        fingerprint = self._outage_fingerprint(snapshot)
+        if fingerprint is None:
+            return
+        key = self._recipient_key(recipient, "outage")
+        if await self._get_state(key) == fingerprint:
             return
 
         message = (
-            f"⚡ Lịch cắt điện - {self.customer_id}\n\n"
+            f"⚡ Lịch cắt điện - {self._display_name()}\n\n"
             f"📅 Ngày: {event.get('start_date') or ''}\n"
             f"🕒 Thời gian: {event.get('start_time') or ''} - {event.get('end_time') or ''}\n"
             f"📍 Khu vực: {event.get('area') or 'Không có thông tin'}\n"
             f"📝 Lý do: {event.get('reason') or 'Không có thông tin'}"
         )
         success = await self._async_service_call(
-            "send_message", {**self._base_data(), "message": message}
+            "send_message", {**self._base_data(recipient), "message": message}
         )
         if success:
-            await self._set_state("zalo_outage", fingerprint)
+            await self._set_state(key, fingerprint)
 
 
 def _file_fingerprint(path: Path) -> str:
