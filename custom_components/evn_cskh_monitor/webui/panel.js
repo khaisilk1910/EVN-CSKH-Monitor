@@ -131,15 +131,13 @@ class EVNCSKHMonitorPanel extends HTMLElement {
               <article class="stat-card"><span>Tổng tiền</span><strong id="yearTotalCost">—</strong><small>hóa đơn EVN có dữ liệu</small></article>
               <article class="stat-card stat-average"><span>Trung bình</span><strong id="yearAvgKwh">—</strong><small id="yearAvgCost">—</small></article>
             </div>
-            <div class="chart-frame yearly-chart-frame">
-              <div id="monthlyBars" class="bars monthly-bars" role="img" aria-label="Biểu đồ sản lượng từng tháng trong năm"></div>
+            <div class="year-chart-legend" aria-label="Chú giải biểu đồ năm">
+              <span><i class="legend-swatch legend-kwh"></i>Sản lượng (kWh)</span>
+              <span><i class="legend-swatch legend-cost"></i>Tiền điện (₫)</span>
+              <small>Mỗi loại dùng thang riêng để hiển thị rõ xu hướng.</small>
             </div>
-            <div class="embedded-table-head"><strong>Chi tiết từng tháng</strong><span>Sản lượng và tiền hóa đơn EVN</span></div>
-            <div class="table-wrap compact-table">
-              <table class="monthly-table">
-                <thead><tr><th>Tháng</th><th>Sản lượng</th><th>Tiền điện</th></tr></thead>
-                <tbody id="monthlyTable"></tbody>
-              </table>
+            <div class="chart-frame yearly-chart-frame">
+              <div id="monthlyBars" class="bars monthly-bars" role="img" aria-label="Biểu đồ cột đôi sản lượng và tiền điện từng tháng trong năm"></div>
             </div>
           </section>
 
@@ -433,23 +431,36 @@ class EVNCSKHMonitorPanel extends HTMLElement {
 
     const sourceRows = this._mergedMonthly().filter((row) => row.year === year);
     const byMonth = new Map(sourceRows.map((row) => [row.month, row]));
-    const values = Array.from({ length: 12 }, (_, index) => {
+    const kwhByMonth = Array.from({ length: 12 }, (_, index) => {
       const raw = byMonth.get(index + 1)?.kwh;
       return raw == null || !Number.isFinite(Number(raw)) ? null : Number(raw);
     });
-    const max = Math.max(1, ...values.filter((value) => value != null));
+    const costByMonth = Array.from({ length: 12 }, (_, index) => {
+      const raw = byMonth.get(index + 1)?.cost;
+      return raw == null || !Number.isFinite(Number(raw)) ? null : Number(raw);
+    });
+    const maxKwh = Math.max(1, ...kwhByMonth.filter((value) => value != null));
+    const maxCost = Math.max(1, ...costByMonth.filter((value) => value != null));
 
     this.$("monthlyBars").innerHTML = Array.from({ length: 12 }, (_, index) => {
       const month = index + 1;
-      const row = byMonth.get(month);
-      const value = values[index];
-      const hasValue = value != null;
-      const pct = hasValue ? Math.max(3, value / max * 100) : 1.5;
-      const title = `Tháng ${month}/${year}: ${hasValue ? this._kwh(value) : "Chưa có dữ liệu"}`;
+      const kwh = kwhByMonth[index];
+      const cost = costByMonth[index];
+      const hasKwh = kwh != null;
+      const hasCost = cost != null;
+      const kwhPct = !hasKwh || kwh <= 0 ? 0 : Math.max(3, kwh / maxKwh * 100);
+      const costPct = !hasCost || cost <= 0 ? 0 : Math.max(3, cost / maxCost * 100);
+      const title = `Tháng ${month}/${year} • Sản lượng: ${hasKwh ? this._kwh(kwh) : "Chưa có dữ liệu"} • Tiền điện: ${hasCost ? this._money(cost) : "Chưa có dữ liệu"}`;
       return `
-        <div class="bar-col ${hasValue ? "" : "missing"}" title="${this._escape(title)}">
-          <span class="bar-value">${hasValue ? this._fmt(value, 1) : ""}</span>
-          <div class="bar-track"><div class="bar" style="--bar-height:${pct}%"></div></div>
+        <div class="month-bar-group ${hasKwh || hasCost ? "" : "missing"}" title="${this._escape(title)}">
+          <div class="month-bar-values" aria-hidden="true">
+            <span class="month-value kwh-value">${hasKwh ? this._fmt(kwh, 1) : "—"}</span>
+            <span class="month-value cost-value">${hasCost ? this._compactMoney(cost) : "—"}</span>
+          </div>
+          <div class="month-bar-tracks">
+            <div class="series-track"><div class="series-bar kwh-bar ${hasKwh ? "" : "missing-series"}" style="--bar-height:${kwhPct}%"></div></div>
+            <div class="series-track"><div class="series-bar cost-bar ${hasCost ? "" : "missing-series"}" style="--bar-height:${costPct}%"></div></div>
+          </div>
           <span class="bar-label">${MONTH_LABELS[index]}</span>
         </div>`;
     }).join("");
@@ -471,16 +482,6 @@ class EVNCSKHMonitorPanel extends HTMLElement {
     this.$("yearTotalCost").textContent = costValues.length ? this._money(totalCost) : "—";
     this.$("yearAvgKwh").textContent = avgKwh == null ? "—" : `${this._fmt(avgKwh, 2)} kWh/tháng`;
     this.$("yearAvgCost").textContent = avgCost == null ? "Tiền: —" : `Tiền: ${this._money(avgCost)}/tháng`;
-
-    const tableRows = sourceRows.slice().sort((a, b) => b.month - a.month);
-    this.$("monthlyTable").innerHTML = tableRows.length
-      ? tableRows.map((row) => `
-          <tr>
-            <td><strong>Tháng ${row.month}</strong><small>${row.year}</small></td>
-            <td>${this._kwh(row.kwh)}</td>
-            <td>${this._money(row.cost)}</td>
-          </tr>`).join("")
-      : `<tr><td colspan="3" class="empty-cell">Chưa có dữ liệu năm ${year || "đã chọn"}.</td></tr>`;
   }
 
   _selectedDailyRows() {
@@ -623,6 +624,16 @@ class EVNCSKHMonitorPanel extends HTMLElement {
     return value == null || !Number.isFinite(Number(value)) ? "—" : `${this._fmt(value)} ₫`;
   }
 
+  _compactMoney(value) {
+    if (value == null || !Number.isFinite(Number(value))) return "—";
+    const amount = Number(value);
+    const abs = Math.abs(amount);
+    if (abs >= 1_000_000_000) return `${this._fmt(amount / 1_000_000_000, 2)}tỷ`;
+    if (abs >= 1_000_000) return `${this._fmt(amount / 1_000_000, 2)}tr`;
+    if (abs >= 1_000) return `${this._fmt(amount / 1_000, 0)}k`;
+    return this._fmt(amount);
+  }
+
   _kwh(value) {
     return value == null || !Number.isFinite(Number(value)) ? "—" : `${this._fmt(value, 3)} kWh`;
   }
@@ -648,15 +659,16 @@ class EVNCSKHMonitorPanel extends HTMLElement {
       .outage-alert{margin-top:12px;border:1px solid rgba(255,191,71,.58);border-radius:19px;padding:clamp(13px,2vw,18px);background:linear-gradient(135deg,rgba(255,191,71,.14),rgba(255,107,122,.08) 55%,color-mix(in srgb,var(--surface) 94%,#24180a));box-shadow:0 18px 48px rgba(255,160,48,.13),inset 0 1px 0 rgba(255,255,255,.05);position:relative;overflow:hidden}.outage-alert:before{content:"";position:absolute;inset:-100px auto auto -80px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(255,191,71,.17),transparent 70%);pointer-events:none}.outage-alert-head{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.outage-title-wrap{display:flex;align-items:center;gap:11px}.outage-bolt{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(145deg,#ffd36d,#ff9f43);color:#231400;font-size:22px;box-shadow:0 10px 28px rgba(255,174,48,.26);animation:outagePulse 2.2s ease-in-out infinite}.outage-kicker{display:block;color:#ffd98a;font-size:10px;font-weight:800;letter-spacing:.12em}.outage-alert h2{margin:1px 0 0;font-size:clamp(18px,1.8vw,24px)}.outage-count{padding:6px 10px;border-radius:999px;background:rgba(255,191,71,.13);border:1px solid rgba(255,191,71,.32);color:#ffe1a3;font-size:11px;font-weight:750;white-space:nowrap}.outage-list{position:relative;display:grid;gap:8px}.outage-item{display:flex;align-items:flex-start;gap:10px;padding:11px 12px;border:1px solid rgba(255,213,128,.2);border-radius:13px;background:rgba(7,16,31,.32)}.outage-item-icon{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;flex:0 0 auto;background:rgba(255,191,71,.13);color:#ffd27b}.outage-item-body{min-width:0}.outage-item strong{display:block;font-size:13px;color:#fff3d2}.outage-item p{margin:3px 0;color:var(--text);overflow-wrap:anywhere}.outage-item small{display:block;color:color-mix(in srgb,var(--muted) 90%,#ffd88b);font-size:11px;overflow-wrap:anywhere}
       .panel{border-radius:18px;margin-top:12px;padding:clamp(12px,2vw,18px)}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}.panel-head h2{margin:0;font-size:clamp(17px,1.6vw,22px);letter-spacing:-.015em}.panel-head p{margin:3px 0 0;color:var(--muted);font-size:12px}.year-badge{display:inline-grid;place-items:center;min-width:60px;padding:6px 10px;border-radius:999px;background:color-mix(in srgb,var(--blue) 12%,transparent);border:1px solid color-mix(in srgb,var(--blue) 25%,transparent);color:#b9d0ff;font-weight:750}
       .stats-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:12px}.stat-card{min-width:0;border:1px solid var(--line);border-radius:13px;padding:11px 12px;background:color-mix(in srgb,var(--bg) 22%,transparent)}.stat-card span{display:block;color:var(--muted);font-size:11px}.stat-card strong{display:block;margin-top:3px;font-size:clamp(15px,1.5vw,20px);line-height:1.25;overflow-wrap:anywhere}.stat-card small{display:block;margin-top:3px;color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}.stat-average strong{color:#bcd3ff}
-      .chart-frame{height:clamp(220px,32vw,355px);padding:8px 2px 0;overflow:hidden}.bars{height:100%;display:grid;align-items:stretch}.monthly-bars{grid-template-columns:repeat(12,minmax(0,1fr));gap:clamp(3px,1vw,12px)}.daily-bars{grid-template-columns:repeat(var(--day-count,31),minmax(3px,1fr));gap:clamp(1px,.35vw,5px);min-width:0}.bar-col{height:100%;display:grid;grid-template-rows:22px 1fr 22px;gap:4px;align-items:end;text-align:center;min-width:0}.bar-value{font-size:clamp(8px,1vw,12px);color:#b8c7dc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.bar-track{position:relative;height:100%;min-height:125px;display:flex;align-items:flex-end;justify-content:center;border-bottom:1px solid var(--line)}.bar-track:before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,var(--line),transparent);opacity:.45}.bar{height:var(--bar-height);width:min(68%,46px);min-width:4px;border-radius:9px 9px 3px 3px;background:linear-gradient(180deg,#65b0ff 0%,#4388ff 38%,#2457e6 100%);box-shadow:0 8px 20px rgba(37,87,230,.25),inset 0 1px 0 rgba(255,255,255,.24);animation:growbar .55s cubic-bezier(.2,.8,.2,1) both;transform-origin:bottom}.day-bar-col .bar{width:72%;border-radius:6px 6px 2px 2px}.bar-col.missing .bar{background:color-mix(in srgb,var(--muted) 12%,transparent);box-shadow:none}.bar-label{font-size:clamp(8px,.9vw,11px);color:var(--muted);align-self:start}.quiet-label{opacity:.3}.bar-col:hover .bar{filter:brightness(1.12)}.daily-chart-frame{height:clamp(225px,29vw,330px)}
-      .embedded-table-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:2px 1px 8px}.embedded-table-head strong{font-size:13px}.embedded-table-head span{font-size:11px;color:var(--muted);text-align:right}.table-wrap{width:100%;overflow:hidden;border:1px solid var(--line);border-radius:13px;background:color-mix(in srgb,var(--bg) 20%,transparent)}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right;vertical-align:middle;overflow-wrap:anywhere}th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#b8c7dc;background:color-mix(in srgb,var(--surface2) 86%,transparent)}th:first-child,td:first-child{text-align:left}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:color-mix(in srgb,var(--blue) 5%,transparent)}td small{display:block;color:var(--muted);font-size:10px}.monthly-table th:nth-child(1){width:24%}.monthly-table th:nth-child(2){width:34%}.monthly-table th:nth-child(3){width:42%}.daily-table th:nth-child(1){width:25%}.daily-table th:nth-child(2){width:38%}.daily-table th:nth-child(3){width:37%}.empty-cell{text-align:center!important;color:var(--muted);padding:22px}
+      .year-chart-legend{display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px;margin:1px 1px 2px;color:var(--muted);font-size:11px}.year-chart-legend>span{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}.year-chart-legend small{margin-left:auto;color:var(--muted);font-size:10.5px}.legend-swatch{display:inline-block;width:10px;height:10px;border-radius:3px;box-shadow:inset 0 1px 0 rgba(255,255,255,.2)}.legend-kwh{background:linear-gradient(180deg,#65b0ff,#2457e6)}.legend-cost{background:linear-gradient(180deg,#ffd477,#e88a18)}
+      .chart-frame{height:clamp(220px,32vw,355px);padding:8px 2px 0;overflow:hidden}.bars{height:100%;display:grid;align-items:stretch}.monthly-bars{grid-template-columns:repeat(12,minmax(0,1fr));gap:clamp(2px,.7vw,10px);min-width:0}.month-bar-group{height:100%;display:grid;grid-template-rows:24px 1fr 22px;gap:4px;align-items:end;text-align:center;min-width:0}.month-bar-values{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px;align-items:end;min-width:0}.month-value{font-size:clamp(7px,.72vw,11px);font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}.kwh-value{color:#9dc8ff}.cost-value{color:#ffd18a}.month-bar-tracks{position:relative;height:100%;min-height:125px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:clamp(2px,.32vw,6px);align-items:stretch;border-bottom:1px solid var(--line);min-width:0}.month-bar-tracks:before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,var(--line),transparent);opacity:.45}.series-track{height:100%;min-width:0;display:flex;align-items:flex-end;justify-content:center}.series-bar{height:var(--bar-height);width:min(82%,32px);min-width:3px;border-radius:8px 8px 3px 3px;animation:growbar .55s cubic-bezier(.2,.8,.2,1) both;transform-origin:bottom;box-shadow:inset 0 1px 0 rgba(255,255,255,.22)}.kwh-bar{background:linear-gradient(180deg,#65b0ff 0%,#4388ff 38%,#2457e6 100%);box-shadow:0 8px 18px rgba(37,87,230,.22),inset 0 1px 0 rgba(255,255,255,.24)}.cost-bar{background:linear-gradient(180deg,#ffd477 0%,#ffb342 42%,#e88a18 100%);box-shadow:0 8px 18px rgba(232,138,24,.2),inset 0 1px 0 rgba(255,255,255,.24)}.series-bar.missing-series{height:0;min-height:0;background:transparent;box-shadow:none}.month-bar-group:hover .series-bar{filter:brightness(1.1)}.daily-bars{grid-template-columns:repeat(var(--day-count,31),minmax(3px,1fr));gap:clamp(1px,.35vw,5px);min-width:0}.bar-col{height:100%;display:grid;grid-template-rows:22px 1fr 22px;gap:4px;align-items:end;text-align:center;min-width:0}.bar-value{font-size:clamp(8px,1vw,12px);color:#b8c7dc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.bar-track{position:relative;height:100%;min-height:125px;display:flex;align-items:flex-end;justify-content:center;border-bottom:1px solid var(--line)}.bar-track:before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,var(--line),transparent);opacity:.45}.bar{height:var(--bar-height);width:min(68%,46px);min-width:4px;border-radius:9px 9px 3px 3px;background:linear-gradient(180deg,#65b0ff 0%,#4388ff 38%,#2457e6 100%);box-shadow:0 8px 20px rgba(37,87,230,.25),inset 0 1px 0 rgba(255,255,255,.24);animation:growbar .55s cubic-bezier(.2,.8,.2,1) both;transform-origin:bottom}.day-bar-col .bar{width:72%;border-radius:6px 6px 2px 2px}.bar-col.missing .bar{background:color-mix(in srgb,var(--muted) 12%,transparent);box-shadow:none}.bar-label{font-size:clamp(8px,.9vw,11px);color:var(--muted);align-self:start}.quiet-label{opacity:.3}.bar-col:hover .bar{filter:brightness(1.12)}.daily-chart-frame{height:clamp(225px,29vw,330px)}
+      .table-wrap{width:100%;overflow:hidden;border:1px solid var(--line);border-radius:13px;background:color-mix(in srgb,var(--bg) 20%,transparent)}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right;vertical-align:middle;overflow-wrap:anywhere}th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#b8c7dc;background:color-mix(in srgb,var(--surface2) 86%,transparent)}th:first-child,td:first-child{text-align:left}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:color-mix(in srgb,var(--blue) 5%,transparent)}td small{display:block;color:var(--muted);font-size:10px}.daily-table th:nth-child(1){width:25%}.daily-table th:nth-child(2){width:38%}.daily-table th:nth-child(3){width:37%}.empty-cell{text-align:center!important;color:var(--muted);padding:22px}
       .month-head{align-items:end}.period-controls{display:grid;grid-template-columns:repeat(2,minmax(100px,145px));gap:8px}.daily-table-wrap{max-height:min(62vh,720px);overflow:auto}.daily-table thead th{position:sticky;top:0;z-index:2}.daily-table td:first-child strong{display:inline-grid;place-items:center;min-width:34px;height:30px;border-radius:9px;background:color-mix(in srgb,var(--blue) 10%,transparent);color:#c6d9ff}.daily-table td:first-child small{margin-top:3px}
       .loading .reload-icon{animation:spin .8s linear infinite}.loading .panel,.loading .metric,.loading .outage-alert{transition:opacity .2s ease;opacity:.82}
       @keyframes growbar{from{transform:scaleY(.05);opacity:.35}to{transform:scaleY(1);opacity:1}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes outagePulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05);box-shadow:0 10px 34px rgba(255,174,48,.36)}}
       @media(max-width:1100px){.topbar-inner{align-items:flex-start;flex-direction:column}.toolbar{width:100%;grid-template-columns:1.3fr .8fr auto}}
-      @media(max-width:760px){.brand p{white-space:normal}.month-head{align-items:flex-start;flex-direction:column}.period-controls{width:100%;grid-template-columns:repeat(2,minmax(0,1fr))}.panel-head p{max-width:68ch}.stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-average{grid-column:1/-1}.outage-alert-head{align-items:flex-start}}
-      @media(max-width:520px){.topbar-inner{padding:12px 10px;gap:12px}.brand{gap:10px}.brand img{width:50px;height:50px;border-radius:15px}.brand h1{font-size:21px}.brand p{font-size:11px;line-height:1.35}.toolbar{grid-template-columns:1fr 1fr}.reload-btn{grid-column:1/-1;height:40px}.control select{height:40px;padding:0 9px}.control>span{font-size:10px}main{padding:10px}.status-row{gap:7px}.customer-meta{width:100%}.metric-grid{gap:8px}.metric{padding:11px;gap:8px;min-height:92px}.metric-icon{width:34px;height:34px;border-radius:10px}.metric strong{font-size:17px}.metric span{font-size:11px}.metric small{font-size:10px}.panel{padding:11px;border-radius:15px}.outage-alert{border-radius:15px;padding:11px}.outage-bolt{width:40px;height:40px}.outage-alert-head{margin-bottom:9px}.outage-item{padding:9px}.stats-grid{gap:6px}.stat-card{padding:9px}.chart-frame{height:250px}.daily-chart-frame{height:235px}.monthly-bars{gap:3px}.daily-bars{gap:1px}.bar-col{grid-template-rows:18px 1fr 18px}.bar-value{font-size:7.5px}.bar-label{font-size:8px}.bar{width:72%;min-width:3px;border-radius:6px 6px 2px 2px}th,td{padding:9px 6px;font-size:11px}.monthly-table th:nth-child(1){width:25%}.monthly-table th:nth-child(2){width:34%}.monthly-table th:nth-child(3){width:41%}.daily-table th:nth-child(1){width:25%}.daily-table th:nth-child(2){width:38%}.daily-table th:nth-child(3){width:37%}.daily-table td:first-child strong{min-width:28px;height:26px}.year-badge{min-width:52px;padding:5px 8px}.panel-head h2{font-size:17px}.panel-head p{font-size:11px}.period-controls{gap:6px}.mini-control select{height:38px;padding:0 8px}.embedded-table-head{align-items:flex-start;flex-direction:column;gap:2px}.embedded-table-head span{text-align:left}}
-      @media(max-width:360px){.brand h1{font-size:19px}.metric-grid{grid-template-columns:1fr}.metric{min-height:80px}.stats-grid{grid-template-columns:1fr}.stat-average{grid-column:auto}.chart-frame{height:225px}.daily-chart-frame{height:215px}.bar-value{display:none}th,td{font-size:10.5px;padding:8px 4px}.outage-count{display:none}}
+      @media(max-width:760px){.brand p{white-space:normal}.month-head{align-items:flex-start;flex-direction:column}.period-controls{width:100%;grid-template-columns:repeat(2,minmax(0,1fr))}.panel-head p{max-width:68ch}.stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-average{grid-column:1/-1}.outage-alert-head{align-items:flex-start}.year-chart-legend small{width:100%;margin-left:0}.month-bar-group{grid-template-rows:22px 1fr 20px}.series-bar{width:86%}}
+      @media(max-width:520px){.topbar-inner{padding:12px 10px;gap:12px}.brand{gap:10px}.brand img{width:50px;height:50px;border-radius:15px}.brand h1{font-size:21px}.brand p{font-size:11px;line-height:1.35}.toolbar{grid-template-columns:1fr 1fr}.reload-btn{grid-column:1/-1;height:40px}.control select{height:40px;padding:0 9px}.control>span{font-size:10px}main{padding:10px}.status-row{gap:7px}.customer-meta{width:100%}.metric-grid{gap:8px}.metric{padding:11px;gap:8px;min-height:92px}.metric-icon{width:34px;height:34px;border-radius:10px}.metric strong{font-size:17px}.metric span{font-size:11px}.metric small{font-size:10px}.panel{padding:11px;border-radius:15px}.outage-alert{border-radius:15px;padding:11px}.outage-bolt{width:40px;height:40px}.outage-alert-head{margin-bottom:9px}.outage-item{padding:9px}.stats-grid{gap:6px}.stat-card{padding:9px}.chart-frame{height:250px}.daily-chart-frame{height:235px}.year-chart-legend{gap:6px 10px;font-size:10px}.year-chart-legend small{font-size:9.5px}.monthly-bars{gap:2px}.month-bar-group{grid-template-rows:18px 1fr 18px;gap:3px}.month-value{font-size:6.8px}.month-bar-tracks{gap:2px;min-height:110px}.series-bar{width:90%;min-width:2px;border-radius:5px 5px 2px 2px}.daily-bars{gap:1px}.bar-col{grid-template-rows:18px 1fr 18px}.bar-value{font-size:7.5px}.bar-label{font-size:8px}.bar{width:72%;min-width:3px;border-radius:6px 6px 2px 2px}th,td{padding:9px 6px;font-size:11px}.daily-table th:nth-child(1){width:25%}.daily-table th:nth-child(2){width:38%}.daily-table th:nth-child(3){width:37%}.daily-table td:first-child strong{min-width:28px;height:26px}.year-badge{min-width:52px;padding:5px 8px}.panel-head h2{font-size:17px}.panel-head p{font-size:11px}.period-controls{gap:6px}.mini-control select{height:38px;padding:0 8px}}
+      @media(max-width:360px){.brand h1{font-size:19px}.metric-grid{grid-template-columns:1fr}.metric{min-height:80px}.stats-grid{grid-template-columns:1fr}.stat-average{grid-column:auto}.chart-frame{height:225px}.daily-chart-frame{height:215px}.month-bar-group{grid-template-rows:1fr 18px}.month-bar-values{display:none}.month-bar-tracks{min-height:105px}.bar-value{display:none}th,td{font-size:10.5px;padding:8px 4px}.outage-count{display:none}}
       @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
     `;
   }
