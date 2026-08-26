@@ -8,10 +8,12 @@ unit-tested without Home Assistant or network access.
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import Iterator
 from html import unescape
 from html.parser import HTMLParser
 import re
+import unicodedata
 from typing import Any
 from urllib.parse import urljoin
 
@@ -57,6 +59,15 @@ _ATTACHMENT_KEY_TOKENS = (
     "image",
     "hinhanh",
     "hinh_anh",
+    "path",
+    "src",
+    "href",
+    "document",
+    "chungtu",
+    "chung_tu",
+    "hddt",
+    "viewer",
+    "resource",
 )
 _INVOICE_TEXT_TOKENS = (
     "hóa đơn",
@@ -101,8 +112,14 @@ class _InvoiceLinkParser(HTMLParser):
 
 
 def normalize_key(value: Any) -> str:
-    """Normalize an EVN field name for tolerant matching."""
-    return re.sub(r"[^a-z0-9_]", "", str(value or "").strip().lower())
+    """Normalize an EVN field name for tolerant matching, including accents."""
+    text = str(value or "").strip().lower().replace("đ", "d")
+    text = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(char)
+    )
+    return re.sub(r"[^a-z0-9_]", "", text)
 
 
 def is_invoice_notification(record: Any) -> bool:
@@ -224,6 +241,17 @@ def iter_attachment_candidates(record: Any) -> Iterator[tuple[str, str]]:
         key_relevant = _attachment_key(key_hint)
         lowered = text.lower()
 
+        # A few EVN gateways wrap attachment metadata as a JSON string inside a
+        # normal JSON field. Recurse into small JSON-looking values so an
+        # embedded file/link is not missed.
+        if len(text) <= 512 * 1024 and text[:1] in {"{", "["}:
+            try:
+                nested = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                nested = None
+            if isinstance(nested, (dict, list)):
+                yield from walk(nested, key_hint)
+
         if lowered.startswith("data:") and ";base64," in lowered[:160]:
             candidate = ("base64", text)
             if candidate not in seen:
@@ -246,13 +274,16 @@ def iter_attachment_candidates(record: Any) -> Iterator[tuple[str, str]]:
 
         # Relative/opaque download locations are only accepted from attachment
         # fields, preventing arbitrary bill text from being treated as a path.
-        if key_relevant and (
+        if key_relevant and len(text) <= 4096 and not any(ch.isspace() for ch in text) and (
             text.startswith(("/", "./", "../"))
             or ".pdf" in lowered
             or ".png" in lowered
             or "download" in lowered
             or "invoice" in lowered
             or "hoadon" in lowered
+            or "hddt" in lowered
+            or "?" in text
+            or "=" in text
         ):
             candidate = ("url", text)
             if candidate not in seen:

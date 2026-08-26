@@ -40,12 +40,12 @@ class ZaloNotifier:
         hass: HomeAssistant,
         entry: ConfigEntry,
         database: EVNDatabase,
-        data_dir: Path,
+        invoice_dir: Path,
     ) -> None:
         self.hass = hass
         self.entry = entry
         self.database = database
-        self.data_dir = data_dir
+        self.invoice_dir = invoice_dir
         self.customer_id = str(entry.data[CONF_CUSTOMER_ID])
         self._process_lock = asyncio.Lock()
 
@@ -234,7 +234,7 @@ class ZaloNotifier:
     ) -> list[tuple[str, int, int, Path]]:
         """Return validated invoice files, newest first.
 
-        Files are discovered from /config/evncskh directly rather than from the
+        Files are discovered from /config/evncskh/Invoices rather than from the
         monthly snapshot. This handles regions where an attachment arrives in a
         notification before the corresponding bill row is available.
         """
@@ -244,9 +244,9 @@ class ZaloNotifier:
             re.IGNORECASE,
         )
         found: list[tuple[str, int, int, Path]] = []
-        if not self.data_dir.is_dir():
+        if not self.invoice_dir.is_dir():
             return found
-        for path in self.data_dir.iterdir():
+        for path in self.invoice_dir.iterdir():
             if not path.is_file():
                 continue
             match = pattern.fullmatch(path.name)

@@ -1425,18 +1425,57 @@ class EVNAPI:
                         return None
         return None
 
-    async def download_file(self, url: str) -> bytes | None:
+    @property
+    def notification_resource_base_url(self) -> str:
+        """Return the source endpoint used to resolve notification attachments."""
+        if self.region == "SPC":
+            return f"{self.base_url}/api/NghiepVu/LayDanhSachThongBaoKhachHang"
+        return NOTIFICATION_URL
+
+    async def download_file(
+        self, url: str, *, base_url: str | None = None
+    ) -> bytes | None:
         """Download an official EVN invoice resource.
 
         Regional APIs often return an opaque download/viewer URL rather than a
-        URL ending in ``.pdf`` or ``.png``.  The caller verifies file signatures;
-        here we follow EVN redirects and one level of HTML viewer links.  EVN
+        URL ending in ``.pdf`` or ``.png``. The caller verifies file signatures;
+        here we follow EVN redirects and HTML/JSON viewer links. ``base_url`` is
+        important for relative URLs returned by the common notification service,
+        which lives on a different host from several regional APIs. EVN
         credentials are only attached to EVN-owned hosts.
         """
         if not url:
             return None
-        start_url = urljoin(f"{self.base_url}/", str(url).strip())
-        return await self._download_file_url(start_url, visited=set(), depth=0)
+        raw_url = str(url).strip()
+        if not raw_url:
+            return None
+        if raw_url.lower().startswith(("http://", "https://")):
+            start_urls = [raw_url]
+        else:
+            source_base = base_url or f"{self.base_url.rstrip('/')}/"
+            start_urls = [urljoin(source_base, raw_url)]
+            parsed = urlsplit(source_base)
+            if parsed.scheme and parsed.netloc:
+                host_root = f"{parsed.scheme}://{parsed.netloc}/"
+                root_url = urljoin(host_root, raw_url)
+                if root_url not in start_urls:
+                    start_urls.append(root_url)
+
+        # Relative attachment paths are not fully consistent between regional
+        # gateways. Try both normal URI resolution (relative to the response
+        # endpoint) and the same host's root. Never fall across to another EVN
+        # region/domain just because a relative notification URL was returned.
+        fallback: bytes | None = None
+        visited: set[str] = set()
+        for start_url in start_urls:
+            content = await self._download_file_url(
+                start_url, visited=visited, depth=0
+            )
+            if detect_invoice_type(content) is not None:
+                return content
+            if content and fallback is None:
+                fallback = content
+        return fallback
 
     async def _download_file_url(
         self, url: str, *, visited: set[str], depth: int
@@ -1475,7 +1514,7 @@ class EVNAPI:
                         # signed external invoice redirect from receiving EVN
                         # credentials by accident.
                         return await self._download_file_url(
-                            redirected, visited=visited, depth=depth
+                            redirected, visited=visited, depth=depth + 1
                         )
                     if resp.status in (401, 403) and attempt == 0 and safe_auth_host:
                         if not await self.login():

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
+import re
 from typing import Any, override
 from uuid import uuid4
 
@@ -299,7 +300,10 @@ class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _async_validate(self, data: dict[str, Any]) -> str | None:
         customer_id = str(data[CONF_CUSTOMER_ID]).strip().upper()
         region = str(data[CONF_REGION])
-        if len(customer_id) < 8 or not customer_id.startswith(("P", "S")):
+        # Customer IDs are used in database keys and invoice filenames. Accept
+        # only the alphanumeric EVN format so malformed input cannot create
+        # unintended filesystem paths.
+        if not re.fullmatch(r"[PS][A-Z][A-Z0-9]{6,30}", customer_id):
             return "invalid_customer_id"
         expected_region = CUSTOMER_ID_PREFIX_REGION.get(customer_id[:2])
         if expected_region and expected_region != region:

@@ -21,6 +21,7 @@ from .const import (
     HISTORY_BOOTSTRAP_DELAY_SECONDS,
     HISTORY_MONTH_PAUSE_SECONDS,
     HISTORY_PREVIOUS_YEARS,
+    INVOICES_DIR_NAME,
     RECENT_BOOTSTRAP_DAYS,
     REFRESH_WINDOW_DAYS,
     UPDATE_INTERVAL,
@@ -38,7 +39,7 @@ from .zalo import ZaloNotifier
 
 _LOGGER = logging.getLogger(__name__)
 
-_INVOICE_RESCAN_STATE_KEY = "invoice_attachment_rescan_v2"
+_INVOICE_RESCAN_STATE_KEY = "invoice_attachment_rescan_v3"
 
 
 class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -64,6 +65,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.api = api
         self.database = database
         self.data_dir = data_dir
+        self.invoice_dir = data_dir / INVOICES_DIR_NAME
         self.customer_id = customer_id
         self.cache_loaded = False
         self._api_lock = asyncio.Lock()
@@ -73,11 +75,22 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._invoice_rescan_complete = False
         self._history_backfill_complete = False
         self._zalo_baseline_ready = False
-        self.zalo = ZaloNotifier(hass, entry, database, data_dir)
+        self.zalo = ZaloNotifier(hass, entry, database, self.invoice_dir)
 
     async def async_initialize(self) -> None:
         """Prepare local storage and load cache without any network request."""
         await self.hass.async_add_executor_job(self.database.initialize)
+        migrated = await self.hass.async_add_executor_job(
+            _prepare_invoice_directory,
+            self.data_dir,
+            self.invoice_dir,
+        )
+        if migrated:
+            _LOGGER.info(
+                "Migrated/cleaned %s legacy EVN invoice file(s) into %s",
+                migrated,
+                self.invoice_dir,
+            )
         self.data = await self.hass.async_add_executor_job(
             self.database.load_snapshot, self.customer_id
         )
@@ -242,6 +255,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             recovered += await self._async_extract_invoice_files(
                                 [row for row in rows if isinstance(row, dict)],
                                 source_hint="stored bill",
+                                resource_base_url=f"{self.api.base_url.rstrip('/')}/",
                             )
                     elif source == "notifications":
                         rows = payload.get("data") if isinstance(payload, dict) else payload
@@ -256,6 +270,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     invoices,
                                     source_hint="stored notification",
                                     allow_generic_period=False,
+                                    resource_base_url=self.api.notification_resource_base_url,
                                 )
                     elif source.startswith(("monthly_", "history_month_")):
                         fallback: tuple[int, int] | None = None
@@ -266,6 +281,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             [payload] if isinstance(payload, dict) else [],
                             fallback_period=fallback,
                             source_hint="stored monthly",
+                            resource_base_url=f"{self.api.base_url.rstrip('/')}/",
                         )
                 except asyncio.CancelledError:
                     raise
@@ -745,7 +761,10 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # viewer/file link. The period is already known from the request, so this
         # is safer than trying to infer it from a generic response timestamp.
         await self._async_extract_invoice_files(
-            [result], fallback_period=(month, year), source_hint="monthly"
+            [result],
+            fallback_period=(month, year),
+            source_hint="monthly",
+            resource_base_url=f"{self.api.base_url.rstrip('/')}/",
         )
 
     async def _async_process_bill_result(self, result: Any, errors: list[str]) -> None:
@@ -763,7 +782,11 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.hass.async_add_executor_job(
             self.database.save_bills, self.customer_id, clean_bills
         )
-        await self._async_extract_invoice_files(clean_bills, source_hint="bill")
+        await self._async_extract_invoice_files(
+            clean_bills,
+            source_hint="bill",
+            resource_base_url=f"{self.api.base_url.rstrip('/')}/",
+        )
 
     async def _async_process_outage_result(
         self,
@@ -866,6 +889,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     invoice_notifications,
                     source_hint="notification",
                     allow_generic_period=False,
+                    resource_base_url=self.api.notification_resource_base_url,
                 )
         if outage_rows and allow_outage_fallback:
             await self.hass.async_add_executor_job(
@@ -1064,6 +1088,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         fallback_period: tuple[int, int] | None = None,
         source_hint: str = "bill",
         allow_generic_period: bool = True,
+        resource_base_url: str | None = None,
     ) -> int:
         """Discover and persist official PDF/PNG files exposed by EVN.
 
@@ -1107,7 +1132,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 already_valid: set[str] = set()
                 for ext in ("pdf", "png"):
-                    path = self.data_dir / f"{self.customer_id}_{month}_{year}.{ext}"
+                    path = self.invoice_dir / f"{self.customer_id}_{month}_{year}.{ext}"
                     if await self.hass.async_add_executor_job(
                         _valid_invoice_file, path, ext
                     ):
@@ -1118,16 +1143,36 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for kind, value in candidates:
                     content: bytes | None
                     if kind == "url":
-                        content = await self.api.download_file(value)
+                        content = await self.api.download_file(
+                            value, base_url=resource_base_url
+                        )
                     elif kind == "base64":
                         content = decode_base64_payload(value)
                     else:
                         continue
+                    if content is None:
+                        _LOGGER.debug(
+                            "EVN %s invoice candidate returned no data for %s %02d/%s",
+                            source_hint,
+                            self.customer_id,
+                            month,
+                            year,
+                        )
+                        continue
                     detected = detect_invoice_type(content)
-                    if detected is None or detected in already_valid or content is None:
+                    if detected is None:
+                        _LOGGER.debug(
+                            "EVN %s invoice candidate for %s %02d/%s was not PDF/PNG",
+                            source_hint,
+                            self.customer_id,
+                            month,
+                            year,
+                        )
+                        continue
+                    if detected in already_valid:
                         continue
 
-                    path = self.data_dir / f"{self.customer_id}_{month}_{year}.{detected}"
+                    path = self.invoice_dir / f"{self.customer_id}_{month}_{year}.{detected}"
                     await self.hass.async_add_executor_job(
                         _write_bytes_atomic, path, content
                     )
@@ -1141,6 +1186,50 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if len(already_valid) == 2:
                         break
         return saved
+
+
+def _prepare_invoice_directory(data_dir: Path, invoice_dir: Path) -> int:
+    """Create the private invoice folder and migrate all valid legacy invoices."""
+    invoice_dir.mkdir(parents=True, exist_ok=True)
+    pattern = re.compile(
+        r"^.+_(0?[1-9]|1[0-2])_(20\d{2})\.(pdf|png)$",
+        re.IGNORECASE,
+    )
+    moved = 0
+    if not data_dir.is_dir():
+        return moved
+    for source in data_dir.iterdir():
+        if not source.is_file():
+            continue
+        match = pattern.fullmatch(source.name)
+        if not match:
+            continue
+        ext = match.group(3).lower()
+        if not _valid_invoice_file(source, ext):
+            _LOGGER.warning("Ignoring invalid legacy invoice file: %s", source)
+            continue
+        destination = invoice_dir / source.name
+        if destination.exists():
+            if _valid_invoice_file(destination, ext):
+                try:
+                    source.unlink()
+                except OSError:
+                    _LOGGER.warning("Could not remove duplicate legacy invoice %s", source)
+                else:
+                    moved += 1
+                continue
+            try:
+                destination.unlink()
+            except OSError:
+                _LOGGER.warning("Could not replace invalid invoice file %s", destination)
+                continue
+        try:
+            source.replace(destination)
+        except OSError as err:
+            _LOGGER.warning("Could not migrate invoice %s: %s", source, err)
+            continue
+        moved += 1
+    return moved
 
 
 def _first_value(data: dict[str, Any], *keys: str) -> Any:

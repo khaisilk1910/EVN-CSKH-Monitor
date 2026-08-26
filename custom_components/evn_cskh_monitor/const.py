@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "evn_cskh_monitor"
 NAME = "EVN CSKH Monitor"
-VERSION = "2026.8.26.6"
+VERSION = "2026.8.26.7"
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 # Connection/config-entry data.
@@ -72,6 +72,7 @@ CUSTOMER_ID_PREFIX_REGION = {
 # Local storage. The path resolves to /config/evncskh on a normal HA install.
 DATA_DIR_NAME = "evncskh"
 DB_FILENAME = "evncskh.db"
+INVOICES_DIR_NAME = "Invoices"
 WEBUI_DIR_NAME = "webui"
 
 # Polling cadence. EVN daily readings normally change once per day, while bills
