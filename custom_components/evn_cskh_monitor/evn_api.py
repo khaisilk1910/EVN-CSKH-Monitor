@@ -832,8 +832,26 @@ class EVNAPI:
 
                     return await resp.json()
 
+        except asyncio.TimeoutError:
+            _LOGGER.debug(
+                "get_chisongay timed out after %ss for region=%s customer=%s; will retry later",
+                REQUEST_TIMEOUT_SECONDS,
+                self.region,
+                self.customer_id,
+            )
+            return None
+        except aiohttp.ClientError as err:
+            _LOGGER.warning(
+                "get_chisongay network error for region=%s customer=%s: %s",
+                self.region,
+                self.customer_id,
+                err,
+            )
+            return None
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            _LOGGER.error(f"get_chisongay error: {e}", exc_info=True)
+            _LOGGER.error(f"get_chisongay unexpected error: {e}", exc_info=True)
             return None
 
     async def get_chisothang(
@@ -1048,8 +1066,33 @@ class EVNAPI:
 
                     return await resp.json()
 
+        except asyncio.TimeoutError:
+            # A slow EVN monthly endpoint is a transient transport failure, not
+            # an integration fault. Returning None keeps the last saved month
+            # intact; both the hourly refresh and history worker will retry it.
+            _LOGGER.debug(
+                "get_chisothang timed out after %ss for %02d/%s region=%s customer=%s; will retry later",
+                REQUEST_TIMEOUT_SECONDS,
+                month,
+                year,
+                self.region,
+                self.customer_id,
+            )
+            return None
+        except aiohttp.ClientError as err:
+            _LOGGER.warning(
+                "get_chisothang network error for %02d/%s region=%s customer=%s: %s",
+                month,
+                year,
+                self.region,
+                self.customer_id,
+                err,
+            )
+            return None
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            _LOGGER.error(f"get_chisothang error: {e}", exc_info=True)
+            _LOGGER.error(f"get_chisothang unexpected error: {e}", exc_info=True)
             return None
 
     async def get_hoadon(self) -> Optional[Dict[str, Any]]:
@@ -1192,8 +1235,26 @@ class EVNAPI:
 
                     return await resp.json()
 
+        except asyncio.TimeoutError:
+            _LOGGER.debug(
+                "get_hoadon timed out after %ss for region=%s customer=%s; will retry later",
+                REQUEST_TIMEOUT_SECONDS,
+                self.region,
+                self.customer_id,
+            )
+            return None
+        except aiohttp.ClientError as err:
+            _LOGGER.warning(
+                "get_hoadon network error for region=%s customer=%s: %s",
+                self.region,
+                self.customer_id,
+                err,
+            )
+            return None
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            _LOGGER.error(f"get_hoadon error: {e}", exc_info=True)
+            _LOGGER.error(f"get_hoadon unexpected error: {e}", exc_info=True)
             return None
 
     async def get_ngungcapdien(
@@ -1405,8 +1466,26 @@ class EVNAPI:
                 "POST", NOTIFICATION_URL, headers=headers, json_body={}
             )
             return data.get("data") if isinstance(data, dict) else None
+        except asyncio.TimeoutError:
+            _LOGGER.debug(
+                "get_thongbao timed out after %ss for region=%s customer=%s; will retry later",
+                REQUEST_TIMEOUT_SECONDS,
+                self.region,
+                self.customer_id,
+            )
+            return None
+        except aiohttp.ClientError as err:
+            _LOGGER.warning(
+                "get_thongbao network error for region=%s customer=%s: %s",
+                self.region,
+                self.customer_id,
+                err,
+            )
+            return None
+        except asyncio.CancelledError:
+            raise
         except Exception as err:
-            _LOGGER.error("get_thongbao error: %s", err, exc_info=True)
+            _LOGGER.error("get_thongbao unexpected error: %s", err, exc_info=True)
             return None
 
     async def _request_json_with_reauth(
