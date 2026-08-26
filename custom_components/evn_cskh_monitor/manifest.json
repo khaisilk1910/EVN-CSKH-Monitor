@@ -5,17 +5,17 @@
     "panel_custom"
   ],
   "codeowners": [
-    "@TriTue2011"
+    "@khaisilk1910"
   ],
   "config_flow": true,
   "dependencies": [
     "frontend",
     "http"
   ],
-  "documentation": "https://github.com/TriTue2011/EVN-CSKH-Monitor",
+  "documentation": "https://github.com/khaisilk1910/EVN-CSKH-Monitor",
   "integration_type": "service",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/TriTue2011/EVN-CSKH-Monitor/issues",
+  "issue_tracker": "https://github.com/khaisilk1910/EVN-CSKH-Monitor/issues",
   "requirements": [
     "pypdfium2==5.13.0"
   ],
