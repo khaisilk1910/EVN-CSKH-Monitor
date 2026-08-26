@@ -10,7 +10,7 @@ from typing import Any
 from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.start import async_at_started
 
@@ -138,7 +138,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> b
     # If an entry is added/reloaded while HA is already running, async_at_started
     # invokes this callback immediately. The refresh itself remains an
     # entry-owned background task and is cancelled automatically on unload.
+    @callback
     def _schedule_initial_refresh(_: HomeAssistant) -> None:
+        # async_at_started wraps callbacks in HassJob. Without @callback a
+        # normal synchronous function is classified as an executor job, which
+        # would run this code in a worker thread. Creating an asyncio task from
+        # that thread uses the wrong running loop on current Home Assistant.
+        # Marking it as an event-loop callback keeps task creation thread-safe.
+        if hass.is_stopping:
+            return
         entry.async_create_background_task(
             hass,
             coordinator.async_refresh(),
