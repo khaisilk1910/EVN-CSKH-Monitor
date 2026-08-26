@@ -169,6 +169,23 @@ class EVNCSKHMonitorPanel extends HTMLElement {
               </table>
             </div>
           </section>
+
+          <section class="panel chart-panel five-year-panel">
+            <div class="panel-head">
+              <div><h2 id="fiveYearTitle">So sánh 5 năm gần nhất</h2><p id="fiveYearCaption">Tổng sản lượng và tổng tiền điện theo từng năm.</p></div>
+            </div>
+            <div class="five-year-summary">
+              <article class="stat-card"><span>Tổng sản lượng</span><strong id="fiveYearTotalKwh">—</strong><small id="fiveYearKwhCaption">trong các năm có dữ liệu</small></article>
+              <article class="stat-card"><span>Tổng tiền</span><strong id="fiveYearTotalCost">—</strong><small id="fiveYearCostCaption">hóa đơn EVN có dữ liệu</small></article>
+            </div>
+            <div class="year-chart-legend" aria-label="Chú giải biểu đồ so sánh 5 năm">
+              <span><i class="legend-swatch legend-kwh"></i>Sản lượng (kWh)</span>
+              <span><i class="legend-swatch legend-cost"></i>Tiền điện (₫)</span>
+            </div>
+            <div class="chart-frame five-year-chart-frame">
+              <div id="fiveYearBars" class="bars five-year-bars" role="img" aria-label="Biểu đồ cột đôi tổng sản lượng và tổng tiền của 5 năm gần nhất"></div>
+            </div>
+          </section>
         </main>
         <div id="chartTooltip" class="chart-tooltip hidden" role="status" aria-live="polite" aria-hidden="true"></div>
       </div>`;
@@ -184,20 +201,22 @@ class EVNCSKHMonitorPanel extends HTMLElement {
     });
     this.$("reloadBtn").addEventListener("click", () => void this._reloadAll());
 
-    const monthlyBars = this.$("monthlyBars");
-    monthlyBars.addEventListener("click", (event) => {
-      const group = event.target.closest?.(".month-bar-group");
-      if (group) this._toggleChartTooltip(group);
-    });
-    monthlyBars.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      const group = event.target.closest?.(".month-bar-group");
-      if (!group) return;
-      event.preventDefault();
-      this._toggleChartTooltip(group);
-    });
+    for (const [containerId, selector] of [["monthlyBars", ".month-bar-group"], ["fiveYearBars", ".five-year-bar-group"]]) {
+      const container = this.$(containerId);
+      container.addEventListener("click", (event) => {
+        const group = event.target.closest?.(selector);
+        if (group) this._toggleChartTooltip(group);
+      });
+      container.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const group = event.target.closest?.(selector);
+        if (!group) return;
+        event.preventDefault();
+        this._toggleChartTooltip(group);
+      });
+    }
     this.shadowRoot.addEventListener("click", (event) => {
-      if (event.target.closest?.(".month-bar-group")) return;
+      if (event.target.closest?.(".month-bar-group,.five-year-bar-group")) return;
       this._hideChartTooltip();
     });
   }
@@ -475,6 +494,7 @@ class EVNCSKHMonitorPanel extends HTMLElement {
     this._renderOutages();
     this._renderYearly();
     this._renderSelectedMonth();
+    this._renderFiveYearComparison();
   }
 
   _renderHeader() {
@@ -533,7 +553,7 @@ class EVNCSKHMonitorPanel extends HTMLElement {
         <div class="month-bar-group ${hasKwh || hasCost ? "" : "missing"}" tabindex="0" role="button" aria-label="${this._escape(title)}" title="${this._escape(title)}" data-tooltip="${this._escape(title)}">
           <div class="month-bar-values" aria-hidden="true">
             <span class="month-value kwh-value">${hasKwh ? this._fmt(kwh, 1) : "—"}</span>
-            <span class="month-value cost-value">${hasCost ? this._compactMoney(cost) : "—"}</span>
+            <span class="month-value cost-value">${hasCost ? this._fmt(cost) : "—"}</span>
           </div>
           <div class="month-bar-tracks">
             <div class="series-track"><div class="series-bar kwh-bar ${hasKwh ? "" : "missing-series"}" style="--bar-height:${kwhPct}%"></div></div>
@@ -551,15 +571,23 @@ class EVNCSKHMonitorPanel extends HTMLElement {
       .map((row) => row.cost)
       .filter((value) => value != null && Number.isFinite(Number(value)))
       .map(Number);
+    const averageRows = sourceRows.filter((row) => row.kwh != null && Number.isFinite(Number(row.kwh)) && Number(row.kwh) > 5);
+    const avgKwhValues = averageRows.map((row) => Number(row.kwh));
+    const avgCostValues = averageRows
+      .map((row) => row.cost)
+      .filter((value) => value != null && Number.isFinite(Number(value)))
+      .map(Number);
     const totalKwh = this._sum(kwhValues);
     const totalCost = this._sum(costValues);
-    const avgKwh = kwhValues.length ? totalKwh / kwhValues.length : null;
-    const avgCost = costValues.length ? totalCost / costValues.length : null;
+    const avgKwh = avgKwhValues.length ? this._sum(avgKwhValues) / avgKwhValues.length : null;
+    const avgCost = avgCostValues.length ? this._sum(avgCostValues) / avgCostValues.length : null;
 
     this.$("yearTotalKwh").textContent = kwhValues.length ? this._kwh(totalKwh) : "—";
     this.$("yearTotalCost").textContent = costValues.length ? this._money(totalCost) : "—";
     this.$("yearAvgKwh").textContent = avgKwh == null ? "—" : `${this._fmt(avgKwh, 2)} kWh/tháng`;
-    this.$("yearAvgCost").textContent = avgCost == null ? "Tiền: —" : `Tiền: ${this._money(avgCost)}/tháng`;
+    this.$("yearAvgCost").textContent = avgCost == null
+      ? `Chỉ tính tháng > 5 kWh · ${avgKwhValues.length} tháng`
+      : `Tiền: ${this._money(avgCost)}/tháng · ${avgKwhValues.length} tháng > 5 kWh`;
   }
 
   _selectedDailyRows() {
@@ -628,17 +656,20 @@ class EVNCSKHMonitorPanel extends HTMLElement {
       .map((row) => row["Điện tiêu thụ (kWh)"])
       .filter((value) => value != null && Number.isFinite(Number(value)))
       .map(Number);
+    const averageValues = values.filter((value) => value > 5);
     const totalKwh = this._sum(values);
-    const avgKwh = values.length ? totalKwh / values.length : null;
+    const avgKwh = averageValues.length ? this._sum(averageValues) / averageValues.length : null;
     const monthRow = this._mergedMonthly().find((row) => row.year === year && row.month === month);
     const cost = monthRow?.cost != null && Number.isFinite(Number(monthRow.cost)) ? Number(monthRow.cost) : null;
-    const avgCost = cost != null && values.length ? cost / values.length : null;
+    const avgCost = cost != null && averageValues.length ? cost / averageValues.length : null;
 
     this.$("monthTotalKwh").textContent = values.length ? this._kwh(totalKwh) : "—";
     this.$("monthDaysCount").textContent = values.length ? `${values.length} ngày có dữ liệu` : "Chưa có ngày có dữ liệu";
     this.$("monthTotalCost").textContent = this._money(cost);
     this.$("monthAvgKwh").textContent = avgKwh == null ? "—" : `${this._fmt(avgKwh, 2)} kWh/ngày`;
-    this.$("monthAvgCost").textContent = avgCost == null ? "Tiền: —" : `Tiền: ${this._money(avgCost)}/ngày`;
+    this.$("monthAvgCost").textContent = avgCost == null
+      ? `Chỉ tính ngày > 5 kWh · ${averageValues.length} ngày`
+      : `Tiền: ${this._money(avgCost)}/ngày · ${averageValues.length} ngày > 5 kWh`;
   }
 
   _renderDailyTable(rows) {
@@ -651,6 +682,73 @@ class EVNCSKHMonitorPanel extends HTMLElement {
             <td>${this._kwh(row["Điện tiêu thụ (kWh)"])}</td>
           </tr>`).join("")
       : `<tr><td colspan="3" class="empty-cell">Chưa có dữ liệu trong tháng đã chọn.</td></tr>`;
+  }
+
+  _renderFiveYearComparison() {
+    this._hideChartTooltip();
+    const merged = this._mergedMonthly();
+    const dataYears = [...new Set(merged.map((row) => row.year).filter(Boolean))].sort((a, b) => b - a);
+    const newestYear = dataYears[0] || new Date().getFullYear();
+    const years = Array.from({ length: 5 }, (_, index) => newestYear - index);
+
+    const stats = years.map((year) => {
+      const rows = merged.filter((row) => row.year === year);
+      const kwhValues = rows
+        .map((row) => row.kwh)
+        .filter((value) => value != null && Number.isFinite(Number(value)))
+        .map(Number);
+      const costValues = rows
+        .map((row) => row.cost)
+        .filter((value) => value != null && Number.isFinite(Number(value)))
+        .map(Number);
+      return {
+        year,
+        kwh: kwhValues.length ? this._sum(kwhValues) : null,
+        cost: costValues.length ? this._sum(costValues) : null,
+        kwhMonths: kwhValues.length,
+        costMonths: costValues.length,
+      };
+    });
+
+    const newest = years[0];
+    const oldest = years[years.length - 1];
+    this.$("fiveYearTitle").textContent = years.length
+      ? `So sánh ${years.length} năm · ${newest}${oldest !== newest ? ` – ${oldest}` : ""}`
+      : "So sánh 5 năm gần nhất";
+    this.$("fiveYearCaption").textContent = years.length
+      ? "Tổng sản lượng và tổng tiền điện của từng năm để so sánh xu hướng dài hạn."
+      : "Chưa có dữ liệu theo năm để so sánh.";
+
+    const kwhTotals = stats.map((item) => item.kwh).filter((value) => value != null);
+    const costTotals = stats.map((item) => item.cost).filter((value) => value != null);
+    this.$("fiveYearTotalKwh").textContent = kwhTotals.length ? this._kwh(this._sum(kwhTotals)) : "—";
+    this.$("fiveYearTotalCost").textContent = costTotals.length ? this._money(this._sum(costTotals)) : "—";
+    this.$("fiveYearKwhCaption").textContent = years.length ? `cộng ${years.length} năm gần nhất có dữ liệu` : "chưa có dữ liệu";
+    this.$("fiveYearCostCaption").textContent = years.length ? `hóa đơn EVN trong ${years.length} năm gần nhất` : "chưa có dữ liệu";
+
+    const maxKwh = Math.max(1, ...kwhTotals);
+    const maxCost = Math.max(1, ...costTotals);
+    const bars = this.$("fiveYearBars");
+    bars.style.setProperty("--year-count", String(Math.max(1, stats.length)));
+    bars.innerHTML = stats.length ? stats.map((item) => {
+      const hasKwh = item.kwh != null;
+      const hasCost = item.cost != null;
+      const kwhPct = !hasKwh || item.kwh <= 0 ? 0 : Math.max(4, item.kwh / maxKwh * 100);
+      const costPct = !hasCost || item.cost <= 0 ? 0 : Math.max(4, item.cost / maxCost * 100);
+      const title = `Năm ${item.year} • Tổng sản lượng: ${hasKwh ? this._kwh(item.kwh) : "Chưa có dữ liệu"} • Tổng tiền: ${hasCost ? this._money(item.cost) : "Chưa có dữ liệu"}`;
+      return `
+        <div class="five-year-bar-group" tabindex="0" role="button" aria-label="${this._escape(title)}" title="${this._escape(title)}" data-tooltip="${this._escape(title)}">
+          <div class="five-year-values" aria-hidden="true">
+            <span class="five-year-value kwh-value">${hasKwh ? this._fmt(item.kwh, 2) : "—"}</span>
+            <span class="five-year-value cost-value">${hasCost ? this._fmt(item.cost) : "—"}</span>
+          </div>
+          <div class="five-year-tracks">
+            <div class="series-track"><div class="series-bar five-year-bar kwh-bar ${hasKwh ? "" : "missing-series"}" style="--bar-height:${kwhPct}%"></div></div>
+            <div class="series-track"><div class="series-bar five-year-bar cost-bar ${hasCost ? "" : "missing-series"}" style="--bar-height:${costPct}%"></div></div>
+          </div>
+          <strong class="five-year-label">${item.year}</strong>
+        </div>`;
+    }).join("") : `<div class="chart-empty">Chưa có dữ liệu để so sánh 5 năm.</div>`;
   }
 
   _renderOutages() {
@@ -702,15 +800,6 @@ class EVNCSKHMonitorPanel extends HTMLElement {
     return value == null || !Number.isFinite(Number(value)) ? "—" : `${this._fmt(value)} ₫`;
   }
 
-  _compactMoney(value) {
-    if (value == null || !Number.isFinite(Number(value))) return "—";
-    const amount = Number(value);
-    const abs = Math.abs(amount);
-    if (abs >= 1_000_000_000) return `${this._fmt(amount / 1_000_000_000, 2)}tỷ`;
-    if (abs >= 1_000_000) return `${this._fmt(amount / 1_000_000, 2)}tr`;
-    if (abs >= 1_000) return `${this._fmt(amount / 1_000, 0)}k`;
-    return this._fmt(amount);
-  }
 
   _kwh(value) {
     return value == null || !Number.isFinite(Number(value)) ? "—" : `${this._fmt(value, 3)} kWh`;
@@ -736,17 +825,18 @@ class EVNCSKHMonitorPanel extends HTMLElement {
       .metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:10px}.metric,.panel{border:1px solid var(--line);background:linear-gradient(145deg,color-mix(in srgb,var(--surface) 96%,#152d50),color-mix(in srgb,var(--surface) 94%,#07101f));box-shadow:var(--shadow)}.metric{position:relative;overflow:hidden;border-radius:16px;padding:14px;display:flex;align-items:center;gap:12px;min-height:105px;transition:transform .2s ease,border-color .2s ease}.metric:after{content:"";position:absolute;width:110px;height:110px;border-radius:50%;right:-45px;top:-55px;background:radial-gradient(circle,color-mix(in srgb,var(--blue) 20%,transparent),transparent 67%)}.metric:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--blue) 38%,var(--line))}.metric-icon{width:40px;height:40px;border-radius:13px;display:grid;place-items:center;flex:0 0 auto;background:color-mix(in srgb,var(--blue) 12%,transparent);color:#a9c8ff;font-weight:800}.metric span{display:block;color:var(--muted);font-size:12px}.metric strong{display:block;margin:2px 0 1px;font-size:clamp(18px,2vw,26px);line-height:1.2;letter-spacing:-.02em;overflow-wrap:anywhere}.metric small{color:var(--muted);font-size:11px}.metric-money .metric-icon{color:#8df0c4;background:rgba(57,217,138,.1)}.metric-debt .metric-icon{color:#ffd88b;background:rgba(255,191,71,.1)}
       .outage-alert{margin-top:12px;border:1px solid rgba(255,191,71,.58);border-radius:19px;padding:clamp(13px,2vw,18px);background:linear-gradient(135deg,rgba(255,191,71,.14),rgba(255,107,122,.08) 55%,color-mix(in srgb,var(--surface) 94%,#24180a));box-shadow:0 18px 48px rgba(255,160,48,.13),inset 0 1px 0 rgba(255,255,255,.05);position:relative;overflow:hidden}.outage-alert:before{content:"";position:absolute;inset:-100px auto auto -80px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(255,191,71,.17),transparent 70%);pointer-events:none}.outage-alert-head{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.outage-title-wrap{display:flex;align-items:center;gap:11px}.outage-bolt{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(145deg,#ffd36d,#ff9f43);color:#231400;font-size:22px;box-shadow:0 10px 28px rgba(255,174,48,.26);animation:outagePulse 2.2s ease-in-out infinite}.outage-kicker{display:block;color:#ffd98a;font-size:10px;font-weight:800;letter-spacing:.12em}.outage-alert h2{margin:1px 0 0;font-size:clamp(18px,1.8vw,24px)}.outage-count{padding:6px 10px;border-radius:999px;background:rgba(255,191,71,.13);border:1px solid rgba(255,191,71,.32);color:#ffe1a3;font-size:11px;font-weight:750;white-space:nowrap}.outage-list{position:relative;display:grid;gap:8px}.outage-item{display:flex;align-items:flex-start;gap:10px;padding:11px 12px;border:1px solid rgba(255,213,128,.2);border-radius:13px;background:rgba(7,16,31,.32)}.outage-item-icon{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;flex:0 0 auto;background:rgba(255,191,71,.13);color:#ffd27b}.outage-item-body{min-width:0}.outage-item strong{display:block;font-size:13px;color:#fff3d2}.outage-item p{margin:3px 0;color:var(--text);overflow-wrap:anywhere}.outage-item small{display:block;color:color-mix(in srgb,var(--muted) 90%,#ffd88b);font-size:11px;overflow-wrap:anywhere}
       .panel{border-radius:18px;margin-top:12px;padding:clamp(12px,2vw,18px)}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}.panel-head h2{margin:0;font-size:clamp(17px,1.6vw,22px);letter-spacing:-.015em}.panel-head p{margin:3px 0 0;color:var(--muted);font-size:12px}.year-badge{display:inline-grid;place-items:center;min-width:60px;padding:6px 10px;border-radius:999px;background:color-mix(in srgb,var(--blue) 12%,transparent);border:1px solid color-mix(in srgb,var(--blue) 25%,transparent);color:#b9d0ff;font-weight:750}
-      .stats-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:12px}.stat-card{min-width:0;border:1px solid var(--line);border-radius:13px;padding:11px 12px;background:color-mix(in srgb,var(--bg) 22%,transparent)}.stat-card span{display:block;color:var(--muted);font-size:11px}.stat-card strong{display:block;margin-top:3px;font-size:clamp(15px,1.5vw,20px);line-height:1.25;overflow-wrap:anywhere}.stat-card small{display:block;margin-top:3px;color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}.stat-average strong{color:#bcd3ff}
+      .stats-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:12px}.stat-card{min-width:0;border:1px solid var(--line);border-radius:13px;padding:11px 12px;background:color-mix(in srgb,var(--bg) 22%,transparent)}.stat-card span{display:block;color:var(--muted);font-size:11px}.stat-card strong{display:block;margin-top:3px;font-size:clamp(15px,1.5vw,20px);line-height:1.25;overflow-wrap:anywhere}.stat-card small{display:block;margin-top:3px;color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}.stat-average strong{color:#bcd3ff}.five-year-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}.five-year-summary .stat-card:first-child strong{color:#a9c8ff}.five-year-summary .stat-card:last-child strong{color:#ffd18a}
       .year-chart-legend{display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px;margin:1px 1px 2px;color:var(--muted);font-size:11px}.year-chart-legend>span{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}.legend-swatch{display:inline-block;width:10px;height:10px;border-radius:3px;box-shadow:inset 0 1px 0 rgba(255,255,255,.2)}.legend-kwh{background:linear-gradient(180deg,#65b0ff,#2457e6)}.legend-cost{background:linear-gradient(180deg,#ffd477,#e88a18)}.chart-tooltip{position:fixed;z-index:10000;max-width:min(340px,calc(100vw - 16px));padding:9px 11px;border:1px solid color-mix(in srgb,var(--blue) 45%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--surface2) 96%,#000);box-shadow:0 14px 38px rgba(0,0,0,.42);color:var(--text);font-size:12px;line-height:1.5;font-weight:600;white-space:pre-line;overflow-wrap:anywhere;pointer-events:none;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
-      .chart-frame{height:clamp(220px,32vw,355px);padding:8px 2px 0;overflow:hidden}.bars{height:100%;display:grid;align-items:stretch}.monthly-bars{grid-template-columns:repeat(12,minmax(0,1fr));gap:clamp(2px,.7vw,10px);min-width:0}.month-bar-group{height:100%;display:grid;grid-template-rows:34px 1fr 22px;gap:4px;align-items:end;text-align:center;min-width:0;cursor:pointer;touch-action:manipulation;border-radius:8px;outline:none}.month-bar-group:focus-visible,.month-bar-group.tooltip-active{box-shadow:0 0 0 2px color-mix(in srgb,var(--blue) 55%,transparent)}.month-bar-values{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px;align-items:end;min-width:0;height:100%}.month-value{font-size:clamp(7px,.72vw,11px);font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;align-self:end}.kwh-value{color:#9dc8ff}.cost-value{color:#ffd18a;overflow:visible;text-overflow:clip;transform:rotate(-34deg);transform-origin:50% 100%;justify-self:center}.month-bar-tracks{position:relative;height:100%;min-height:125px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:clamp(2px,.32vw,6px);align-items:stretch;border-bottom:1px solid var(--line);min-width:0}.month-bar-tracks:before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,var(--line),transparent);opacity:.45}.series-track{height:100%;min-width:0;display:flex;align-items:flex-end;justify-content:center}.series-bar{height:var(--bar-height);width:min(82%,32px);min-width:3px;border-radius:8px 8px 3px 3px;animation:growbar .55s cubic-bezier(.2,.8,.2,1) both;transform-origin:bottom;box-shadow:inset 0 1px 0 rgba(255,255,255,.22)}.kwh-bar{background:linear-gradient(180deg,#65b0ff 0%,#4388ff 38%,#2457e6 100%);box-shadow:0 8px 18px rgba(37,87,230,.22),inset 0 1px 0 rgba(255,255,255,.24)}.cost-bar{background:linear-gradient(180deg,#ffd477 0%,#ffb342 42%,#e88a18 100%);box-shadow:0 8px 18px rgba(232,138,24,.2),inset 0 1px 0 rgba(255,255,255,.24)}.series-bar.missing-series{height:0;min-height:0;background:transparent;box-shadow:none}.month-bar-group:hover .series-bar{filter:brightness(1.1)}.daily-bars{grid-template-columns:repeat(var(--day-count,31),minmax(3px,1fr));gap:clamp(1px,.35vw,5px);min-width:0}.bar-col{height:100%;display:grid;grid-template-rows:22px 1fr 22px;gap:4px;align-items:end;text-align:center;min-width:0}.bar-value{font-size:clamp(8px,1vw,12px);color:#b8c7dc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}.bar-track{position:relative;height:100%;min-height:125px;display:flex;align-items:flex-end;justify-content:center;border-bottom:1px solid var(--line)}.bar-track:before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,var(--line),transparent);opacity:.45}.bar{height:var(--bar-height);width:min(68%,46px);min-width:4px;border-radius:9px 9px 3px 3px;background:linear-gradient(180deg,#65b0ff 0%,#4388ff 38%,#2457e6 100%);box-shadow:0 8px 20px rgba(37,87,230,.25),inset 0 1px 0 rgba(255,255,255,.24);animation:growbar .55s cubic-bezier(.2,.8,.2,1) both;transform-origin:bottom}.day-bar-col .bar{width:72%;border-radius:6px 6px 2px 2px}.bar-col.missing .bar{background:color-mix(in srgb,var(--muted) 12%,transparent);box-shadow:none}.bar-label{font-size:clamp(8px,.9vw,11px);color:var(--muted);align-self:start}.quiet-label{opacity:.3}.bar-col:hover .bar{filter:brightness(1.12)}.daily-chart-frame{height:clamp(225px,29vw,330px)}
+      .chart-frame{height:clamp(220px,32vw,355px);padding:8px 2px 0;overflow:hidden}.bars{height:100%;display:grid;align-items:stretch}.monthly-bars{grid-template-columns:repeat(12,minmax(0,1fr));gap:clamp(2px,.7vw,10px);min-width:0}.month-bar-group{height:100%;display:grid;grid-template-rows:56px 1fr 22px;gap:8px;align-items:end;text-align:center;min-width:0;cursor:pointer;touch-action:manipulation;border-radius:8px;outline:none}.month-bar-group:focus-visible,.month-bar-group.tooltip-active{box-shadow:0 0 0 2px color-mix(in srgb,var(--blue) 55%,transparent)}.month-bar-values{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:clamp(2px,.28vw,5px);align-items:end;min-width:0;height:100%;padding:0 0 5px}.month-value{font-size:clamp(7px,.7vw,10.5px);font-weight:650;white-space:nowrap;overflow:visible;text-overflow:clip;min-width:0;align-self:end;justify-self:center;transform:rotate(-48deg);transform-origin:50% 100%;line-height:1}.kwh-value{color:#9dc8ff}.cost-value{color:#ffd18a}.month-bar-tracks{position:relative;height:100%;min-height:125px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:clamp(2px,.32vw,6px);align-items:stretch;border-bottom:1px solid var(--line);min-width:0}.month-bar-tracks:before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,var(--line),transparent);opacity:.45}.series-track{height:100%;min-width:0;display:flex;align-items:flex-end;justify-content:center}.series-bar{height:var(--bar-height);width:min(82%,32px);min-width:3px;border-radius:8px 8px 3px 3px;animation:growbar .55s cubic-bezier(.2,.8,.2,1) both;transform-origin:bottom;box-shadow:inset 0 1px 0 rgba(255,255,255,.22)}.kwh-bar{background:linear-gradient(180deg,#65b0ff 0%,#4388ff 38%,#2457e6 100%);box-shadow:0 8px 18px rgba(37,87,230,.22),inset 0 1px 0 rgba(255,255,255,.24)}.cost-bar{background:linear-gradient(180deg,#ffd477 0%,#ffb342 42%,#e88a18 100%);box-shadow:0 8px 18px rgba(232,138,24,.2),inset 0 1px 0 rgba(255,255,255,.24)}.series-bar.missing-series{height:0;min-height:0;background:transparent;box-shadow:none}.month-bar-group:hover .series-bar{filter:brightness(1.1)}.daily-bars{grid-template-columns:repeat(var(--day-count,31),minmax(3px,1fr));gap:clamp(1px,.35vw,5px);min-width:0}.bar-col{height:100%;display:grid;grid-template-rows:40px 1fr 22px;gap:8px;align-items:end;text-align:center;min-width:0}.bar-value{font-size:clamp(7px,.78vw,10.5px);color:#b8c7dc;white-space:nowrap;overflow:visible;text-overflow:clip;min-width:0;align-self:end;justify-self:center;transform:rotate(-48deg);transform-origin:50% 100%;line-height:1;padding-bottom:4px}.bar-track{position:relative;height:100%;min-height:125px;display:flex;align-items:flex-end;justify-content:center;border-bottom:1px solid var(--line)}.bar-track:before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,var(--line),transparent);opacity:.45}.bar{height:var(--bar-height);width:min(68%,46px);min-width:4px;border-radius:9px 9px 3px 3px;background:linear-gradient(180deg,#65b0ff 0%,#4388ff 38%,#2457e6 100%);box-shadow:0 8px 20px rgba(37,87,230,.25),inset 0 1px 0 rgba(255,255,255,.24);animation:growbar .55s cubic-bezier(.2,.8,.2,1) both;transform-origin:bottom}.day-bar-col .bar{width:72%;border-radius:6px 6px 2px 2px}.bar-col.missing .bar{background:color-mix(in srgb,var(--muted) 12%,transparent);box-shadow:none}.bar-label{font-size:clamp(8px,.9vw,11px);color:var(--muted);align-self:start}.quiet-label{opacity:.3}.bar-col:hover .bar{filter:brightness(1.12)}.daily-chart-frame{height:clamp(225px,29vw,330px)}
+      .five-year-chart-frame{height:clamp(250px,30vw,360px)}.five-year-bars{grid-template-columns:repeat(var(--year-count,5),minmax(0,1fr));gap:clamp(8px,2.2vw,38px);min-width:0}.five-year-bar-group{height:100%;display:grid;grid-template-rows:62px 1fr 28px;gap:9px;align-items:end;text-align:center;min-width:0;cursor:pointer;touch-action:manipulation;border-radius:9px;outline:none}.five-year-bar-group:focus-visible,.five-year-bar-group.tooltip-active{box-shadow:0 0 0 2px color-mix(in srgb,var(--blue) 55%,transparent)}.five-year-values{height:100%;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:clamp(3px,.5vw,8px);align-items:end;padding:0 0 5px;min-width:0}.five-year-value{font-size:clamp(7.5px,.85vw,11px);font-weight:700;white-space:nowrap;overflow:visible;justify-self:center;transform:rotate(-42deg);transform-origin:50% 100%;line-height:1}.five-year-tracks{position:relative;height:100%;min-height:145px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:clamp(4px,.8vw,12px);align-items:stretch;border-bottom:1px solid var(--line);min-width:0}.five-year-tracks:before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,var(--line),transparent);opacity:.42}.five-year-bar{width:min(76%,58px);min-width:8px;border-radius:9px 9px 3px 3px}.five-year-label{align-self:start;font-size:clamp(11px,1.15vw,14px);color:#c9d8ef}.five-year-bar-group:hover .series-bar{filter:brightness(1.1)}.chart-empty{grid-column:1/-1;display:grid;place-items:center;color:var(--muted);font-size:12px;border:1px dashed var(--line);border-radius:12px;min-height:180px}
       .table-wrap{width:100%;overflow:hidden;border:1px solid var(--line);border-radius:13px;background:color-mix(in srgb,var(--bg) 20%,transparent)}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right;vertical-align:middle;overflow-wrap:anywhere}th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#b8c7dc;background:color-mix(in srgb,var(--surface2) 86%,transparent)}th:first-child,td:first-child{text-align:left}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:color-mix(in srgb,var(--blue) 5%,transparent)}td small{display:block;color:var(--muted);font-size:10px}.daily-table th:nth-child(1){width:25%}.daily-table th:nth-child(2){width:38%}.daily-table th:nth-child(3){width:37%}.empty-cell{text-align:center!important;color:var(--muted);padding:22px}
       .month-head{align-items:end}.period-controls{display:grid;grid-template-columns:repeat(2,minmax(100px,145px));gap:8px}.daily-table-wrap{max-height:min(62vh,720px);overflow:auto}.daily-table thead th{position:sticky;top:0;z-index:2}.daily-table td:first-child strong{display:inline-grid;place-items:center;min-width:34px;height:30px;border-radius:9px;background:color-mix(in srgb,var(--blue) 10%,transparent);color:#c6d9ff}.daily-table td:first-child small{margin-top:3px}
       .loading .reload-icon{animation:spin .8s linear infinite}.loading .panel,.loading .metric,.loading .outage-alert{transition:opacity .2s ease;opacity:.82}
       @keyframes growbar{from{transform:scaleY(.05);opacity:.35}to{transform:scaleY(1);opacity:1}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes outagePulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05);box-shadow:0 10px 34px rgba(255,174,48,.36)}}
       @media(max-width:1100px){.topbar-inner{align-items:flex-start;flex-direction:column}.toolbar{width:100%;grid-template-columns:1.3fr .8fr auto}}
-      @media(max-width:760px){.brand p{white-space:normal}.month-head{align-items:flex-start;flex-direction:column}.period-controls{width:100%;grid-template-columns:repeat(2,minmax(0,1fr))}.panel-head p{max-width:68ch}.stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-average{grid-column:1/-1}.outage-alert-head{align-items:flex-start}.month-bar-group{grid-template-rows:36px 1fr 20px}.cost-value{transform:rotate(-48deg);font-size:7px}.series-bar{width:86%}.bar-col{grid-template-rows:34px 1fr 22px}.bar-value{font-size:7px;overflow:visible;text-overflow:clip;transform:rotate(-58deg);transform-origin:50% 100%;justify-self:center;align-self:end}}
-      @media(max-width:520px){.topbar-inner{padding:12px 10px;gap:12px}.brand{gap:10px}.brand img{width:50px;height:50px;border-radius:15px}.brand h1{font-size:21px}.brand p{font-size:11px;line-height:1.35}.toolbar{grid-template-columns:1fr 1fr}.reload-btn{grid-column:1/-1;height:40px}.control select{height:40px;padding:0 9px}.control>span{font-size:10px}main{padding:10px}.status-row{gap:7px}.customer-meta{width:100%}.metric-grid{gap:8px}.metric{padding:11px;gap:8px;min-height:92px}.metric-icon{width:34px;height:34px;border-radius:10px}.metric strong{font-size:17px}.metric span{font-size:11px}.metric small{font-size:10px}.panel{padding:11px;border-radius:15px}.outage-alert{border-radius:15px;padding:11px}.outage-bolt{width:40px;height:40px}.outage-alert-head{margin-bottom:9px}.outage-item{padding:9px}.stats-grid{gap:6px}.stat-card{padding:9px}.chart-frame{height:260px}.daily-chart-frame{height:250px}.year-chart-legend{gap:6px 10px;font-size:10px}.monthly-bars{gap:2px}.month-bar-group{grid-template-rows:38px 1fr 18px;gap:3px}.month-value{font-size:6.7px}.cost-value{transform:rotate(-55deg)}.month-bar-tracks{gap:2px;min-height:110px}.series-bar{width:90%;min-width:2px;border-radius:5px 5px 2px 2px}.daily-bars{gap:1px}.bar-col{grid-template-rows:38px 1fr 18px}.bar-value{font-size:6.4px;transform:rotate(-64deg)}.bar-label{font-size:8px}.bar{width:72%;min-width:3px;border-radius:6px 6px 2px 2px}th,td{padding:9px 6px;font-size:11px}.daily-table th:nth-child(1){width:25%}.daily-table th:nth-child(2){width:38%}.daily-table th:nth-child(3){width:37%}.daily-table td:first-child strong{min-width:28px;height:26px}.year-badge{min-width:52px;padding:5px 8px}.panel-head h2{font-size:17px}.panel-head p{font-size:11px}.period-controls{gap:6px}.mini-control select{height:38px;padding:0 8px}.chart-tooltip{font-size:11.5px;padding:8px 10px}}
-      @media(max-width:360px){.brand h1{font-size:19px}.metric-grid{grid-template-columns:1fr}.metric{min-height:80px}.stats-grid{grid-template-columns:1fr}.stat-average{grid-column:auto}.chart-frame{height:245px}.daily-chart-frame{height:235px}.month-bar-group{grid-template-rows:36px 1fr 18px}.month-value{font-size:6px}.cost-value{transform:rotate(-62deg)}.month-bar-tracks{min-height:105px}.bar-col{grid-template-rows:40px 1fr 18px}.bar-value{font-size:5.7px;transform:rotate(-70deg)}th,td{font-size:10.5px;padding:8px 4px}.outage-count{display:none}}
+      @media(max-width:760px){.brand p{white-space:normal}.month-head{align-items:flex-start;flex-direction:column}.period-controls{width:100%;grid-template-columns:repeat(2,minmax(0,1fr))}.panel-head p{max-width:68ch}.stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-average{grid-column:1/-1}.outage-alert-head{align-items:flex-start}.month-bar-group{grid-template-rows:66px 1fr 20px;gap:9px}.month-value{transform:rotate(-58deg);font-size:6.8px}.series-bar{width:86%}.bar-col{grid-template-rows:52px 1fr 22px;gap:9px}.bar-value{font-size:6.8px;transform:rotate(-58deg)}.five-year-bar-group{grid-template-rows:72px 1fr 24px;gap:9px}.five-year-value{font-size:6.8px;transform:rotate(-55deg)}.five-year-tracks{gap:4px}.five-year-bar{width:82%;min-width:5px}}
+      @media(max-width:520px){.topbar-inner{padding:12px 10px;gap:12px}.brand{gap:10px}.brand img{width:50px;height:50px;border-radius:15px}.brand h1{font-size:21px}.brand p{font-size:11px;line-height:1.35}.toolbar{grid-template-columns:1fr 1fr}.reload-btn{grid-column:1/-1;height:40px}.control select{height:40px;padding:0 9px}.control>span{font-size:10px}main{padding:10px}.status-row{gap:7px}.customer-meta{width:100%}.metric-grid{gap:8px}.metric{padding:11px;gap:8px;min-height:92px}.metric-icon{width:34px;height:34px;border-radius:10px}.metric strong{font-size:17px}.metric span{font-size:11px}.metric small{font-size:10px}.panel{padding:11px;border-radius:15px}.outage-alert{border-radius:15px;padding:11px}.outage-bolt{width:40px;height:40px}.outage-alert-head{margin-bottom:9px}.outage-item{padding:9px}.stats-grid{gap:6px}.stat-card{padding:9px}.five-year-summary{grid-template-columns:1fr;gap:6px}.chart-frame{height:300px}.daily-chart-frame{height:285px}.five-year-chart-frame{height:315px}.year-chart-legend{gap:6px 10px;font-size:10px}.monthly-bars{gap:2px}.month-bar-group{grid-template-rows:78px 1fr 18px;gap:10px}.month-bar-values{gap:1px;padding-bottom:7px}.month-value{font-size:6.1px;transform:rotate(-68deg)}.month-bar-tracks{gap:2px;min-height:110px}.series-bar{width:90%;min-width:2px;border-radius:5px 5px 2px 2px}.daily-bars{gap:1px}.bar-col{grid-template-rows:64px 1fr 18px;gap:10px}.bar-value{font-size:6px;transform:rotate(-68deg);padding-bottom:6px}.bar-label{font-size:8px}.bar{width:72%;min-width:3px;border-radius:6px 6px 2px 2px}.five-year-bars{gap:5px}.five-year-bar-group{grid-template-rows:86px 1fr 22px;gap:9px}.five-year-values{gap:1px;padding-bottom:7px}.five-year-value{font-size:5.9px;transform:rotate(-67deg)}.five-year-tracks{gap:2px;min-height:120px}.five-year-bar{width:88%;min-width:3px;border-radius:6px 6px 2px 2px}.five-year-label{font-size:10px}th,td{padding:9px 6px;font-size:11px}.daily-table th:nth-child(1){width:25%}.daily-table th:nth-child(2){width:38%}.daily-table th:nth-child(3){width:37%}.daily-table td:first-child strong{min-width:28px;height:26px}.year-badge{min-width:52px;padding:5px 8px}.panel-head h2{font-size:17px}.panel-head p{font-size:11px}.period-controls{gap:6px}.mini-control select{height:38px;padding:0 8px}.chart-tooltip{font-size:11.5px;padding:8px 10px}}
+      @media(max-width:360px){.brand h1{font-size:19px}.metric-grid{grid-template-columns:1fr}.metric{min-height:80px}.stats-grid{grid-template-columns:1fr}.stat-average{grid-column:auto}.chart-frame{height:310px}.daily-chart-frame{height:295px}.five-year-chart-frame{height:325px}.month-bar-group{grid-template-rows:84px 1fr 18px;gap:10px}.month-value{font-size:5.7px;transform:rotate(-72deg)}.month-bar-tracks{min-height:105px}.bar-col{grid-template-rows:70px 1fr 18px;gap:10px}.bar-value{font-size:5.6px;transform:rotate(-72deg)}.five-year-bar-group{grid-template-rows:94px 1fr 20px}.five-year-value{font-size:5.4px;transform:rotate(-72deg)}.five-year-tracks{min-height:115px}.five-year-label{font-size:9px}th,td{font-size:10.5px;padding:8px 4px}.outage-count{display:none}}
       @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
     `;
   }
