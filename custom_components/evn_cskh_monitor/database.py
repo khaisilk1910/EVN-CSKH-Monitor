@@ -338,6 +338,71 @@ class EVNDatabase:
             )
             conn.commit()
 
+    def sync_outages(
+        self,
+        customer_id: str,
+        outages: list[dict[str, Any]],
+        window_start: datetime,
+        window_end: datetime,
+    ) -> None:
+        """Replace outage rows inside one authoritative EVN query window.
+
+        The schedule endpoint is queried for a complete date range. Removing old
+        rows in that same range before inserting the fresh response prevents a
+        cancelled EVN outage from remaining visible until its original date.
+        The coordinator only falls back to notification-derived outage rows
+        when the regional schedule response is not authoritative.
+        """
+        rows: list[tuple[Any, ...]] = []
+        for outage in outages:
+            start = str(outage.get("ngay_bat_dau") or "")
+            if not start:
+                continue
+            rows.append(
+                (
+                    customer_id,
+                    start,
+                    str(outage.get("ngay_ket_thuc") or start),
+                    str(outage.get("thoi_gian_bat_dau") or ""),
+                    str(outage.get("thoi_gian_ket_thuc") or ""),
+                    str(outage.get("ly_do") or ""),
+                    str(outage.get("khu_vuc") or ""),
+                )
+            )
+
+        start_iso = window_start.date().isoformat()
+        end_iso = window_end.date().isoformat()
+        with _SQLITE_LOCK, self._connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM power_outage_schedule
+                WHERE customer_id=?
+                  AND date(
+                    substr(ngay_bat_dau,7,4) || '-' ||
+                    substr(ngay_bat_dau,4,2) || '-' ||
+                    substr(ngay_bat_dau,1,2)
+                  ) BETWEEN date(?) AND date(?)
+                """,
+                (customer_id, start_iso, end_iso),
+            )
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO power_outage_schedule(
+                        customer_id, ngay_bat_dau, ngay_ket_thuc,
+                        thoi_gian_bat_dau, thoi_gian_ket_thuc, ly_do, khu_vuc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(customer_id, ngay_bat_dau, thoi_gian_bat_dau)
+                    DO UPDATE SET
+                        ngay_ket_thuc=excluded.ngay_ket_thuc,
+                        thoi_gian_ket_thuc=excluded.thoi_gian_ket_thuc,
+                        ly_do=excluded.ly_do,
+                        khu_vuc=excluded.khu_vuc
+                    """,
+                    rows,
+                )
+            conn.commit()
+
     def save_notifications(self, customer_id: str, notifications: list[dict[str, Any]]) -> None:
         rows: list[tuple[Any, ...]] = []
         for note in notifications:

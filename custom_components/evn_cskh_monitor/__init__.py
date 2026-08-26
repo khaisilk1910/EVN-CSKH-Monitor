@@ -13,6 +13,7 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.start import async_at_started
 
 from .const import (
     CONF_CUSTOMER_ID,
@@ -87,8 +88,10 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         _sync_webui_assets, source_webui, webui_dir, VERSION
     )
 
+    # panel.js is cache-busted by VERSION in module_url, so static caching is
+    # safe and avoids repeatedly transferring unchanged frontend assets.
     await hass.http.async_register_static_paths(
-        [StaticPathConfig(WEBUI_URL_PREFIX, str(webui_dir), False)]
+        [StaticPathConfig(WEBUI_URL_PREFIX, str(webui_dir), True)]
     )
     async_register_views(hass)
 
@@ -140,15 +143,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> b
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # The initial EVN refresh is detached from setup so a slow cloud cannot hold
-    # Home Assistant startup. A successful refresh schedules the historical
-    # bootstrap itself; this ordering ensures Zalo baseline seeding always sees
-    # the current bill/outage/daily snapshot before old history is imported.
-    entry.async_create_background_task(
-        hass,
-        coordinator.async_refresh(),
-        name=f"{DOMAIN} initial refresh {entry.entry_id}",
-    )
+    # Do not start EVN network traffic until Home Assistant has fully started.
+    # If an entry is added/reloaded while HA is already running, async_at_started
+    # invokes this callback immediately. The refresh itself remains an
+    # entry-owned background task and is cancelled automatically on unload.
+    def _schedule_initial_refresh(_: HomeAssistant) -> None:
+        entry.async_create_background_task(
+            hass,
+            coordinator.async_refresh(),
+            name=f"{DOMAIN} initial refresh {entry.entry_id}",
+        )
+
+    entry.async_on_unload(async_at_started(hass, _schedule_initial_refresh))
     return True
 
 

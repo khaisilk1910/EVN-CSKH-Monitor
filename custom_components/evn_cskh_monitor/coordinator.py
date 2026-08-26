@@ -132,6 +132,8 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             previous_month = (12, now.year - 1)
         else:
             previous_month = (now.month - 1, now.year)
+        outage_window_start = now - timedelta(days=30)
+        outage_window_end = now + timedelta(days=60)
 
         async with self._api_lock:
             results = await asyncio.gather(
@@ -139,8 +141,8 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.api.get_chisothang(*previous_month),
                 self.api.get_hoadon(),
                 self.api.get_ngungcapdien(
-                    (now - timedelta(days=30)).strftime("%d/%m/%Y"),
-                    (now + timedelta(days=60)).strftime("%d/%m/%Y"),
+                    outage_window_start.strftime("%d/%m/%Y"),
+                    outage_window_end.strftime("%d/%m/%Y"),
                 ),
                 self.api.get_thongbao(),
                 return_exceptions=True,
@@ -163,8 +165,14 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "monthly_previous", previous_month_data, *previous_month, errors
         )
         await self._async_process_bill_result(bill_data, errors)
-        await self._async_process_outage_result(outage_data, errors)
-        await self._async_process_notifications_result(notifications, errors)
+        outage_schedule_authoritative = await self._async_process_outage_result(
+            outage_data, errors, outage_window_start, outage_window_end
+        )
+        await self._async_process_notifications_result(
+            notifications,
+            errors,
+            allow_outage_fallback=not outage_schedule_authoritative,
+        )
 
         sync_time = dt_util.now().isoformat()
         await self.hass.async_add_executor_job(
@@ -757,17 +765,31 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         await self._async_extract_invoice_files(clean_bills, source_hint="bill")
 
-    async def _async_process_outage_result(self, result: Any, errors: list[str]) -> None:
+    async def _async_process_outage_result(
+        self,
+        result: Any,
+        errors: list[str],
+        window_start: datetime,
+        window_end: datetime,
+    ) -> bool:
+        """Persist outage schedule and report whether it is authoritative.
+
+        SPC/CPC/HCMC return a complete schedule for the requested date window.
+        A valid list from those regions, including an empty list, is therefore
+        authoritative and notification parsing must not reinsert stale/cancelled
+        schedules. HN/NPC still rely on notification-derived outage data.
+        """
         if isinstance(result, Exception):
             errors.append(f"outage: {result}")
-            return
+            return False
         if result is None:
             errors.append("outage: no response")
-            return
+            return False
         await self._async_save_raw("outage", result)
         payload = result.get("data") if isinstance(result, dict) else None
         if not isinstance(payload, list):
-            return
+            errors.append("outage: invalid response")
+            return False
         rows = []
         for item in payload:
             if not isinstance(item, dict):
@@ -775,13 +797,33 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             normalized = self._normalize_outage(item)
             if normalized:
                 rows.append(normalized)
+
+        # SPC/CPC/HCMC expose a usable schedule endpoint for the requested
+        # range, so an empty list is meaningful and should clear cancelled old
+        # rows. HN/NPC are different: EVN may return an empty schedule endpoint
+        # while the actual outage exists only in the notification feed, so never
+        # clear their notification-derived rows from an empty schedule response.
+        if self.api.region in {"SPC", "CPC", "HCMC"}:
+            await self.hass.async_add_executor_job(
+                self.database.sync_outages,
+                self.customer_id,
+                rows,
+                window_start,
+                window_end,
+            )
+            return True
         if rows:
             await self.hass.async_add_executor_job(
                 self.database.save_outages, self.customer_id, rows
             )
+        return False
 
     async def _async_process_notifications_result(
-        self, result: Any, errors: list[str]
+        self,
+        result: Any,
+        errors: list[str],
+        *,
+        allow_outage_fallback: bool = True,
     ) -> None:
         if isinstance(result, Exception):
             errors.append(f"notifications: {result}")
@@ -825,7 +867,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     source_hint="notification",
                     allow_generic_period=False,
                 )
-        if outage_rows:
+        if outage_rows and allow_outage_fallback:
             await self.hass.async_add_executor_job(
                 self.database.save_outages, self.customer_id, outage_rows
             )

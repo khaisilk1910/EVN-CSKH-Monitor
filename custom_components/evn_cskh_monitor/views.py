@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-import re
 from typing import Any
 
 from aiohttp import web
@@ -26,7 +24,6 @@ from .const import (
     DOMAIN,
     NAME,
 )
-from .invoice import detect_invoice_type
 from .naming import device_display_name
 
 
@@ -46,56 +43,6 @@ def _json_number(value: Any) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
-
-
-def _invoice_files(
-    data_dir: Path,
-    customer_id: str,
-    monthly: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    """List validated invoice files directly from the private data folder.
-
-    Do not depend on a monthly DB row being present: some EVN regions can expose
-    the official attachment through notifications before the billing endpoint is
-    populated. The function runs in Home Assistant's executor.
-    """
-    del monthly  # Kept in the signature for compatibility with older callers.
-    pattern = re.compile(
-        rf"^{re.escape(customer_id)}_(0?[1-9]|1[0-2])_(20\d{{2}})\.(pdf|png)$",
-        re.IGNORECASE,
-    )
-    files: list[dict[str, Any]] = []
-    if not data_dir.is_dir():
-        return files
-    for path in data_dir.iterdir():
-        if not path.is_file():
-            continue
-        match = pattern.fullmatch(path.name)
-        if not match:
-            continue
-        month = int(match.group(1))
-        year = int(match.group(2))
-        ext = match.group(3).lower()
-        try:
-            stat = path.stat()
-            if stat.st_size <= 0:
-                continue
-            with path.open("rb") as handle:
-                if detect_invoice_type(handle.read(64)) != ext:
-                    continue
-        except OSError:
-            continue
-        files.append(
-            {
-                "month": month,
-                "year": year,
-                "type": ext,
-                "name": path.name,
-                "size": stat.st_size,
-            }
-        )
-    files.sort(key=lambda item: (item["year"], item["month"], item["type"]), reverse=True)
-    return files
 
 
 def _webui_settings(entry) -> tuple[str, str]:
@@ -262,10 +209,6 @@ class EVNSummaryView(HomeAssistantView):
         coverage = (len(valid_daily) / expected_days * 100) if expected_days else 0
         peak = max(valid_daily, key=lambda row: float(row["consumption"]), default=None)
         low = min(valid_daily, key=lambda row: float(row["consumption"]), default=None)
-        files = await hass.async_add_executor_job(
-            _invoice_files, runtime.data_dir, account, monthly
-        )
-
         return web.json_response(
             {
                 "customer": customer,
@@ -300,7 +243,6 @@ class EVNSummaryView(HomeAssistantView):
                 ],
                 "notification_count": len(snapshot.get("notifications", [])),
                 "raw_server_record_count": int(snapshot.get("raw_record_count", 0)),
-                "invoice_files": files,
             }
         )
 
