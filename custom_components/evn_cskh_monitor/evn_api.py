@@ -13,7 +13,7 @@ import aiohttp
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import REQUEST_TIMEOUT_SECONDS
+from .const import OUTAGE_REQUEST_TIMEOUT_SECONDS, REQUEST_TIMEOUT_SECONDS
 from .invoice import (
     decode_base64_payload,
     detect_invoice_type,
@@ -70,6 +70,7 @@ class EVNAPI:
         self.access_token: Optional[str] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+        self._outage_timeout = aiohttp.ClientTimeout(total=OUTAGE_REQUEST_TIMEOUT_SECONDS)
         self._login_lock = asyncio.Lock()
         self.last_login_auth_failed = False
         self.last_login_error: str | None = None
@@ -1234,14 +1235,14 @@ class EVNAPI:
                 
                 _LOGGER.debug(f"get_ngungcapdien (SPC): URL={url}, params={params}, region={self.region}")
                 
-                async with session.get(url, params=params, headers=headers, timeout=self._timeout) as resp:
+                async with session.get(url, params=params, headers=headers, timeout=self._outage_timeout) as resp:
                     if resp.status == 401:
                         if await self.login():
                             headers["Authorization"] = f"Bearer {self.access_token}"
-                            async with session.get(url, params=params, headers=headers, timeout=self._timeout) as retry_resp:
+                            async with session.get(url, params=params, headers=headers, timeout=self._outage_timeout) as retry_resp:
                                 if retry_resp.status != 200:
                                     error_text = await retry_resp.text()
-                                    _LOGGER.error(f"get_ngungcapdien failed with status {retry_resp.status}, response: {error_text[:500]}")
+                                    _LOGGER.warning(f"get_ngungcapdien failed with status {retry_resp.status}, response: {error_text[:500]}")
                                     return None
                                 data = await retry_resp.json()
                                 # SPC trả về list trực tiếp, chuyển đổi format và wrap vào dict với key "data"
@@ -1253,7 +1254,7 @@ class EVNAPI:
 
                     if resp.status != 200:
                         error_text = await resp.text()
-                        _LOGGER.error(f"get_ngungcapdien failed with status {resp.status}, URL={url}, params={params}, response: {error_text[:500]}")
+                        _LOGGER.warning(f"get_ngungcapdien failed with status {resp.status}, URL={url}, params={params}, response: {error_text[:500]}")
                         return None
 
                     data = await resp.json()
@@ -1278,13 +1279,13 @@ class EVNAPI:
                     "authorization": f"Bearer {self.access_token}",
                 }
 
-                async with session.post(url, json=payload, headers=headers, timeout=self._timeout) as resp:
+                async with session.post(url, json=payload, headers=headers, timeout=self._outage_timeout) as resp:
                     if resp.status == 401:
                         if await self.login():
                             headers["authorization"] = f"Bearer {self.access_token}"
-                            async with session.post(url, json=payload, headers=headers, timeout=self._timeout) as retry_resp:
+                            async with session.post(url, json=payload, headers=headers, timeout=self._outage_timeout) as retry_resp:
                                 if retry_resp.status != 200:
-                                    _LOGGER.error(f"get_ngungcapdien failed with status {retry_resp.status}")
+                                    _LOGGER.warning(f"get_ngungcapdien failed with status {retry_resp.status}")
                                     return None
                                 data = await retry_resp.json()
                                 # Chuyển đổi format cho CPC
@@ -1296,7 +1297,7 @@ class EVNAPI:
                         return None
 
                     if resp.status != 200:
-                        _LOGGER.error(f"get_ngungcapdien failed with status {resp.status}")
+                        _LOGGER.warning(f"get_ngungcapdien failed with status {resp.status}")
                         return None
 
                     data = await resp.json()
@@ -1307,8 +1308,31 @@ class EVNAPI:
                             return {"data": converted_data}
                     return data
 
+        except asyncio.TimeoutError:
+            # Lịch ngừng cấp điện là endpoint độc lập/không bắt buộc. EVN thỉnh
+            # thoảng phản hồi chậm hoặc không phản hồi; coi timeout là mất dữ
+            # liệu tạm thời để coordinator tiếp tục dùng dữ liệu đã lưu và
+            # notification fallback, thay vì ghi ERROR + full traceback.
+            _LOGGER.debug(
+                "get_ngungcapdien timed out after %ss for region=%s customer=%s",
+                OUTAGE_REQUEST_TIMEOUT_SECONDS,
+                self.region,
+                self.customer_id,
+            )
+            return None
+        except aiohttp.ClientError as err:
+            _LOGGER.warning(
+                "get_ngungcapdien network error for region=%s customer=%s: %s",
+                self.region,
+                self.customer_id,
+                err,
+            )
+            return None
+        except asyncio.CancelledError:
+            # Never swallow Home Assistant shutdown/unload cancellation.
+            raise
         except Exception as e:
-            _LOGGER.error(f"get_ngungcapdien error: {e}", exc_info=True)
+            _LOGGER.error(f"get_ngungcapdien unexpected error: {e}", exc_info=True)
             return None
 
 

@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "evn_cskh_monitor"
 NAME = "EVN CSKH Monitor"
-VERSION = "2026.8.26.1807"
+VERSION = "2026.8.26.1829"
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 # Connection/config-entry data.
@@ -93,6 +93,10 @@ HISTORY_MONTH_PAUSE_SECONDS = 0.20
 
 # HTTP/network behavior.
 REQUEST_TIMEOUT_SECONDS = 30
+# The outage schedule endpoint is optional and has a notification fallback.
+# Keep its timeout shorter so a slow EVN outage service cannot hold the whole
+# coordinator refresh for the full general request timeout.
+OUTAGE_REQUEST_TIMEOUT_SECONDS = 15
 
 # Web panel/API paths are unique to this integration. Only the webui subfolder is
 # exposed as static content; the SQLite database and invoice files remain private.
