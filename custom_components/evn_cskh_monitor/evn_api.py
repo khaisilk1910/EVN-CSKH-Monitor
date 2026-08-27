@@ -5,6 +5,7 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta
 import json
 import logging
+from time import monotonic
 from typing import Any, Dict, Optional
 from urllib.parse import urljoin
 from urllib.parse import urlsplit
@@ -13,7 +14,11 @@ import aiohttp
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import REQUEST_TIMEOUT_SECONDS
+from .const import (
+    REQUEST_CONNECT_TIMEOUT_SECONDS,
+    REQUEST_READ_TIMEOUT_SECONDS,
+    REQUEST_TIMEOUT_SECONDS,
+)
 from .invoice import (
     decode_base64_payload,
     detect_invoice_type,
@@ -69,8 +74,14 @@ class EVNAPI:
         self.base_url = EVN_REGIONS.get(self.region)
         self.access_token: Optional[str] = None
         self._session: Optional[aiohttp.ClientSession] = None
-        self._timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+        self._timeout = aiohttp.ClientTimeout(
+            total=REQUEST_TIMEOUT_SECONDS,
+            connect=REQUEST_CONNECT_TIMEOUT_SECONDS,
+            sock_connect=REQUEST_CONNECT_TIMEOUT_SECONDS,
+            sock_read=REQUEST_READ_TIMEOUT_SECONDS,
+        )
         self._login_lock = asyncio.Lock()
+        self._transport_log_times: dict[str, float] = {}
         self.last_login_auth_failed = False
         self.last_login_error: str | None = None
         self.ma_dviqly: Optional[str] = None  # Lưu từ login response
@@ -93,6 +104,35 @@ class EVNAPI:
     async def close(self) -> None:
         """Release local references; Home Assistant owns the shared session."""
         self._session = None
+
+    def _log_transport_failure(self, operation: str, err: BaseException) -> None:
+        """Log expected EVN network failures without traceback spam.
+
+        aiohttp turns an internal ``CancelledError`` used by its timeout timer
+        into ``TimeoutError``.  That is a normal transport failure, not a Home
+        Assistant task-cancellation bug.  Endpoint-level transport failures are
+        kept at debug level; the coordinator decides whether a partial failure
+        is harmless or whether the whole refresh should be reported as failed.
+        """
+        now = monotonic()
+        last = self._transport_log_times.get(operation, 0.0)
+        self._transport_log_times[operation] = now
+
+        if isinstance(err, TimeoutError):
+            detail = f"timed out (total limit {REQUEST_TIMEOUT_SECONDS}s)"
+        else:
+            detail = str(err).strip() or err.__class__.__name__
+
+        if now - last >= 15 * 60:
+            _LOGGER.debug(
+                "%s transport unavailable for %s (%s, %s): %s; cached data will be kept",
+                operation,
+                self.customer_id,
+                self.region,
+                self.base_url,
+                detail,
+            )
+        _LOGGER.debug("Full %s transport exception", operation, exc_info=True)
 
     def _get_ma_dviqly_and_ma_ddo(self):
         """Get MA_DVIQLY and MA_DDO for API payload based on region.
@@ -244,6 +284,14 @@ class EVNAPI:
                     )
                 return True
 
+        except (TimeoutError, aiohttp.ClientError) as err:
+            self.last_login_error = (
+                f"EVN login timed out after {REQUEST_TIMEOUT_SECONDS}s"
+                if isinstance(err, TimeoutError)
+                else f"EVN login transport error: {err}"
+            )
+            self._log_transport_failure("login", err)
+            return False
         except Exception as err:
             self.last_login_error = str(err)
             _LOGGER.error("EVN login request failed: %s", err, exc_info=True)
@@ -306,6 +354,14 @@ class EVNAPI:
                 )
                 return True
 
+        except (TimeoutError, aiohttp.ClientError) as err:
+            self.last_login_error = (
+                f"SPC login timed out after {REQUEST_TIMEOUT_SECONDS}s"
+                if isinstance(err, TimeoutError)
+                else f"SPC login transport error: {err}"
+            )
+            self._log_transport_failure("SPC login", err)
+            return False
         except Exception as err:
             self.last_login_error = str(err)
             _LOGGER.error("SPC login request failed: %s", err, exc_info=True)
@@ -354,6 +410,14 @@ class EVNAPI:
                     _LOGGER.error("No evn_session cookie in HCMC login response")
                     return False
                     
+        except (TimeoutError, aiohttp.ClientError) as err:
+            self.last_login_error = (
+                f"HCMC login timed out after {REQUEST_TIMEOUT_SECONDS}s"
+                if isinstance(err, TimeoutError)
+                else f"HCMC login transport error: {err}"
+            )
+            self._log_transport_failure("HCMC login", err)
+            return False
         except Exception as err:
             self.last_login_error = str(err)
             _LOGGER.error("HCMC login request failed: %s", err, exc_info=True)
@@ -420,6 +484,14 @@ class EVNAPI:
                 _LOGGER.info(f"Account switched successfully to {self.customer_id}, maDviqly={self.ma_dviqly}, maDdo={self.ma_ddo}")
                 return True
 
+        except (TimeoutError, aiohttp.ClientError) as err:
+            self.last_login_error = (
+                f"EVN account switch timed out after {REQUEST_TIMEOUT_SECONDS}s"
+                if isinstance(err, TimeoutError)
+                else f"EVN account switch transport error: {err}"
+            )
+            self._log_transport_failure("account switch", err)
+            return False
         except Exception as err:
             self.last_login_error = str(err)
             _LOGGER.error("EVN account switch request failed: %s", err, exc_info=True)
@@ -759,35 +831,16 @@ class EVNAPI:
                 
                 _LOGGER.debug(f"get_chisongay (SPC): URL={url}, params={params}, region={self.region}")
                 
-                async with session.get(url, params=params, headers=headers, timeout=self._timeout) as resp:
-                    if resp.status == 401:
-                        # Token expired, try login again
-                        if await self.login():
-                            headers["authorization"] = f"Bearer {self.access_token}"
-                            async with session.get(url, params=params, headers=headers, timeout=self._timeout) as retry_resp:
-                                if retry_resp.status != 200:
-                                    error_text = await retry_resp.text()
-                                    _LOGGER.error(f"get_chisongay failed with status {retry_resp.status}, response: {error_text[:500]}")
-                                    return None
-                                data = await retry_resp.json()
-                                # SPC trả về list trực tiếp, chuyển đổi format và wrap vào dict với key "data"
-                                if isinstance(data, list):
-                                    converted_data = self._convert_spc_to_standard_format(data)
-                                    return {"data": converted_data}
-                                return data
-                        return None
-
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        _LOGGER.error(f"get_chisongay failed with status {resp.status}, URL={url}, params={params}, response: {error_text[:500]}")
-                        return None
-
-                    data = await resp.json()
-                    # SPC trả về list trực tiếp, chuyển đổi format và wrap vào dict với key "data"
-                    if isinstance(data, list):
-                        converted_data = self._convert_spc_to_standard_format(data)
-                        return {"data": converted_data}
-                    return data
+                data = await self._request_json_with_reauth(
+                    "GET", url, headers=headers, params=params
+                )
+                if data is None:
+                    return None
+                # SPC trả về list trực tiếp, chuyển đổi format và wrap vào dict với key "data"
+                if isinstance(data, list):
+                    converted_data = self._convert_spc_to_standard_format(data)
+                    return {"data": converted_data}
+                return data
             else:
                 # Các region khác dùng endpoint chung
                 url = f"{self.base_url}/api/evn/tracuu/chisongay"
@@ -811,26 +864,16 @@ class EVNAPI:
 
                 _LOGGER.debug(f"get_chisongay: URL={url}, payload={payload}, region={self.region}")
 
-                async with session.post(url, json=payload, headers=headers, timeout=self._timeout) as resp:
-                    if resp.status == 401:
-                        # Token expired, try login again
-                        if await self.login():
-                            headers["authorization"] = f"Bearer {self.access_token}"
-                            async with session.post(url, json=payload, headers=headers, timeout=self._timeout) as retry_resp:
-                                if retry_resp.status != 200:
-                                    error_text = await retry_resp.text()
-                                    _LOGGER.error(f"get_chisongay failed with status {retry_resp.status}, response: {error_text[:500]}")
-                                    return None
-                                return await retry_resp.json()
-                        return None
+                return await self._request_json_with_reauth(
+                    "POST",
+                    url,
+                    headers=headers,
+                    json_body=payload,
+                )
 
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        _LOGGER.error(f"get_chisongay failed with status {resp.status}, URL={url}, payload={payload}, response: {error_text[:500]}")
-                        return None
-
-                    return await resp.json()
-
+        except (TimeoutError, aiohttp.ClientError) as err:
+            self._log_transport_failure("get_chisongay", err)
+            return None
         except Exception as e:
             _LOGGER.error(f"get_chisongay error: {e}", exc_info=True)
             return None
@@ -1030,23 +1073,16 @@ class EVNAPI:
                     "authorization": f"Bearer {self.access_token}",
                 }
 
-                async with session.post(url, json=payload, headers=headers, timeout=self._timeout) as resp:
-                    if resp.status == 401:
-                        if await self.login():
-                            headers["authorization"] = f"Bearer {self.access_token}"
-                            async with session.post(url, json=payload, headers=headers, timeout=self._timeout) as retry_resp:
-                                if retry_resp.status != 200:
-                                    _LOGGER.error(f"get_chisothang failed with status {retry_resp.status}")
-                                    return None
-                                return await retry_resp.json()
-                        return None
+                return await self._request_json_with_reauth(
+                    "POST",
+                    url,
+                    headers=headers,
+                    json_body=payload,
+                )
 
-                    if resp.status != 200:
-                        _LOGGER.error(f"get_chisothang failed with status {resp.status}")
-                        return None
-
-                    return await resp.json()
-
+        except (TimeoutError, aiohttp.ClientError) as err:
+            self._log_transport_failure("get_chisothang", err)
+            return None
         except Exception as e:
             _LOGGER.error(f"get_chisothang error: {e}", exc_info=True)
             return None
@@ -1137,32 +1173,15 @@ class EVNAPI:
                 
                 _LOGGER.debug(f"get_hoadon (SPC): URL={url}, params={params}, region={self.region}")
                 
-                async with session.get(url, params=params, headers=headers, timeout=self._timeout) as resp:
-                    if resp.status == 401:
-                        if await self.login():
-                            headers["Authorization"] = f"Bearer {self.access_token}"
-                            async with session.get(url, params=params, headers=headers, timeout=self._timeout) as retry_resp:
-                                if retry_resp.status != 200:
-                                    error_text = await retry_resp.text()
-                                    _LOGGER.error(f"get_hoadon failed with status {retry_resp.status}, response: {error_text[:500]}")
-                                    return None
-                                data = await retry_resp.json()
-                                # SPC trả về list trực tiếp, wrap vào dict với key "data"
-                                if isinstance(data, list):
-                                    return {"data": data}
-                                return data
-                        return None
-
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        _LOGGER.error(f"get_hoadon failed with status {resp.status}, URL={url}, params={params}, response: {error_text[:500]}")
-                        return None
-
-                    data = await resp.json()
-                    # SPC trả về list trực tiếp, wrap vào dict với key "data"
-                    if isinstance(data, list):
-                        return {"data": data}
-                    return data
+                data = await self._request_json_with_reauth(
+                    "GET", url, headers=headers, params=params
+                )
+                if data is None:
+                    return None
+                # SPC trả về list trực tiếp, wrap vào dict với key "data"
+                if isinstance(data, list):
+                    return {"data": data}
+                return data
             else:
                 # Các region khác dùng endpoint chung
                 url = f"{self.base_url}/api/evn/tracuu/hoadon"
@@ -1174,23 +1193,15 @@ class EVNAPI:
                     "authorization": f"Bearer {self.access_token}",
                 }
 
-                async with session.post(url, headers=headers, timeout=self._timeout) as resp:
-                    if resp.status == 401:
-                        if await self.login():
-                            headers["authorization"] = f"Bearer {self.access_token}"
-                            async with session.post(url, headers=headers, timeout=self._timeout) as retry_resp:
-                                if retry_resp.status != 200:
-                                    _LOGGER.error(f"get_hoadon failed with status {retry_resp.status}")
-                                    return None
-                                return await retry_resp.json()
-                        return None
+                return await self._request_json_with_reauth(
+                    "POST",
+                    url,
+                    headers=headers,
+                )
 
-                    if resp.status != 200:
-                        _LOGGER.error(f"get_hoadon failed with status {resp.status}")
-                        return None
-
-                    return await resp.json()
-
+        except (TimeoutError, aiohttp.ClientError) as err:
+            self._log_transport_failure("get_hoadon", err)
+            return None
         except Exception as e:
             _LOGGER.error(f"get_hoadon error: {e}", exc_info=True)
             return None
@@ -1234,34 +1245,16 @@ class EVNAPI:
                 
                 _LOGGER.debug(f"get_ngungcapdien (SPC): URL={url}, params={params}, region={self.region}")
                 
-                async with session.get(url, params=params, headers=headers, timeout=self._timeout) as resp:
-                    if resp.status == 401:
-                        if await self.login():
-                            headers["Authorization"] = f"Bearer {self.access_token}"
-                            async with session.get(url, params=params, headers=headers, timeout=self._timeout) as retry_resp:
-                                if retry_resp.status != 200:
-                                    error_text = await retry_resp.text()
-                                    _LOGGER.error(f"get_ngungcapdien failed with status {retry_resp.status}, response: {error_text[:500]}")
-                                    return None
-                                data = await retry_resp.json()
-                                # SPC trả về list trực tiếp, chuyển đổi format và wrap vào dict với key "data"
-                                if isinstance(data, list):
-                                    converted_data = self._convert_spc_outage_to_standard_format(data)
-                                    return {"data": converted_data}
-                                return data
-                        return None
-
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        _LOGGER.error(f"get_ngungcapdien failed with status {resp.status}, URL={url}, params={params}, response: {error_text[:500]}")
-                        return None
-
-                    data = await resp.json()
-                    # SPC trả về list trực tiếp, chuyển đổi format và wrap vào dict với key "data"
-                    if isinstance(data, list):
-                        converted_data = self._convert_spc_outage_to_standard_format(data)
-                        return {"data": converted_data}
-                    return data
+                data = await self._request_json_with_reauth(
+                    "GET", url, headers=headers, params=params
+                )
+                if data is None:
+                    return None
+                # SPC trả về list trực tiếp, chuyển đổi format và wrap vào dict với key "data"
+                if isinstance(data, list):
+                    converted_data = self._convert_spc_outage_to_standard_format(data)
+                    return {"data": converted_data}
+                return data
             else:
                 # Các region khác dùng endpoint chung
                 url = f"{self.base_url}/api/evn/tracuu/ngungcapdien"
@@ -1278,35 +1271,24 @@ class EVNAPI:
                     "authorization": f"Bearer {self.access_token}",
                 }
 
-                async with session.post(url, json=payload, headers=headers, timeout=self._timeout) as resp:
-                    if resp.status == 401:
-                        if await self.login():
-                            headers["authorization"] = f"Bearer {self.access_token}"
-                            async with session.post(url, json=payload, headers=headers, timeout=self._timeout) as retry_resp:
-                                if retry_resp.status != 200:
-                                    _LOGGER.error(f"get_ngungcapdien failed with status {retry_resp.status}")
-                                    return None
-                                data = await retry_resp.json()
-                                # Chuyển đổi format cho CPC
-                                if self.region == "CPC" and isinstance(data, dict) and data.get("data"):
-                                    if isinstance(data["data"], list):
-                                        converted_data = self._convert_cpc_outage_to_standard_format(data["data"])
-                                        return {"data": converted_data}
-                                return data
-                        return None
-
-                    if resp.status != 200:
-                        _LOGGER.error(f"get_ngungcapdien failed with status {resp.status}")
-                        return None
-
-                    data = await resp.json()
+                data = await self._request_json_with_reauth(
+                    "POST",
+                    url,
+                    headers=headers,
+                    json_body=payload,
+                )
+                if data is None:
+                    return None
                     # Chuyển đổi format cho CPC
-                    if self.region == "CPC" and isinstance(data, dict) and data.get("data"):
-                        if isinstance(data["data"], list):
-                            converted_data = self._convert_cpc_outage_to_standard_format(data["data"])
-                            return {"data": converted_data}
-                    return data
+                if self.region == "CPC" and isinstance(data, dict) and data.get("data"):
+                    if isinstance(data["data"], list):
+                        converted_data = self._convert_cpc_outage_to_standard_format(data["data"])
+                        return {"data": converted_data}
+                return data
 
+        except (TimeoutError, aiohttp.ClientError) as err:
+            self._log_transport_failure("get_ngungcapdien", err)
+            return None
         except Exception as e:
             _LOGGER.error(f"get_ngungcapdien error: {e}", exc_info=True)
             return None
@@ -1381,6 +1363,9 @@ class EVNAPI:
                 "POST", NOTIFICATION_URL, headers=headers, json_body={}
             )
             return data.get("data") if isinstance(data, dict) else None
+        except (TimeoutError, aiohttp.ClientError) as err:
+            self._log_transport_failure("get_thongbao", err)
+            return None
         except Exception as err:
             _LOGGER.error("get_thongbao error: %s", err, exc_info=True)
             return None
@@ -1394,36 +1379,84 @@ class EVNAPI:
         params: dict[str, Any] | None = None,
         json_body: Any | None = None,
     ) -> Any | None:
-        """Issue a small JSON request and retry once after an auth refresh."""
+        """Issue a JSON request with bounded transport retry and one reauth.
+
+        A timeout is retried only once and only while Home Assistant is still
+        running.  This covers short EVN gateway stalls without turning an
+        outage into an unbounded task.  Authentication is refreshed at most
+        once independently of the transport retry budget.
+        """
         session = await self._get_session()
-        for attempt in range(2):
-            async with session.request(
-                method,
-                url,
-                params=params,
-                json=json_body,
-                headers=headers,
-                timeout=self._timeout,
-            ) as resp:
-                if resp.status in (401, 403) and attempt == 0:
-                    if not await self.login():
+        transient_retries = 0
+        auth_refreshed = False
+        while True:
+            try:
+                async with session.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_body,
+                    headers=headers,
+                    timeout=self._timeout,
+                ) as resp:
+                    if resp.status in (401, 403) and not auth_refreshed:
+                        auth_refreshed = True
+                        if not await self.login():
+                            if (
+                                self.last_login_auth_failed
+                                or self.hass.is_stopping
+                            ):
+                                return None
+                            await asyncio.sleep(0.75)
+                            if not await self.login():
+                                return None
+                        token_key = (
+                            "Authorization"
+                            if "Authorization" in headers
+                            else "authorization"
+                        )
+                        headers[token_key] = f"Bearer {self.access_token}"
+                        continue
+                    if resp.status in {408, 429, 500, 502, 503, 504}:
+                        if transient_retries < 1 and not self.hass.is_stopping:
+                            transient_retries += 1
+                            retry_after = 0.75
+                            header = resp.headers.get("Retry-After")
+                            if header:
+                                try:
+                                    retry_after = min(max(float(header), 0.25), 2.0)
+                                except ValueError:
+                                    pass
+                            resp.release()
+                            await asyncio.sleep(retry_after)
+                            continue
+                    if resp.status != 200:
+                        text = await resp.text()
+                        _LOGGER.debug(
+                            "EVN request failed %s %s: HTTP %s %s",
+                            method,
+                            url,
+                            resp.status,
+                            text[:300],
+                        )
                         return None
-                    token_key = "Authorization" if "Authorization" in headers else "authorization"
-                    headers[token_key] = f"Bearer {self.access_token}"
-                    continue
-                if resp.status != 200:
-                    text = await resp.text()
-                    _LOGGER.debug("EVN request failed %s %s: HTTP %s %s", method, url, resp.status, text[:300])
-                    return None
-                try:
-                    return await resp.json(content_type=None)
-                except Exception:
-                    text = await resp.text()
                     try:
-                        return json.loads(text)
-                    except Exception:
-                        return None
-        return None
+                        return await resp.json(content_type=None)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        text = await resp.text()
+                        try:
+                            return json.loads(text)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            return None
+            except asyncio.CancelledError:
+                raise
+            except (TimeoutError, aiohttp.ClientError):
+                if transient_retries >= 1 or self.hass.is_stopping:
+                    raise
+                transient_retries += 1
+                # A small cooperative delay prevents an immediate second hit on
+                # an already-busy EVN gateway while keeping refresh latency low.
+                await asyncio.sleep(0.75)
 
     @property
     def notification_resource_base_url(self) -> str:

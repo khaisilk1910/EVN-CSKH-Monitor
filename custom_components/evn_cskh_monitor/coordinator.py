@@ -17,11 +17,15 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     DAILY_BATCH_DAYS,
+    DOMAIN,
+    FAILED_REFRESH_RETRY_SECONDS,
     HISTORY_BATCH_PAUSE_SECONDS,
     HISTORY_BOOTSTRAP_DELAY_SECONDS,
     HISTORY_MONTH_PAUSE_SECONDS,
     HISTORY_PREVIOUS_YEARS,
     INVOICES_DIR_NAME,
+    MAX_CONCURRENT_EVN_REQUESTS,
+    NETWORK_SEMAPHORE_DATA_KEY,
     RECENT_BOOTSTRAP_DAYS,
     REFRESH_WINDOW_DAYS,
     UPDATE_INTERVAL,
@@ -69,6 +73,12 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.customer_id = customer_id
         self.cache_loaded = False
         self._api_lock = asyncio.Lock()
+        domain_data = hass.data.setdefault(DOMAIN, {})
+        network_semaphore = domain_data.get(NETWORK_SEMAPHORE_DATA_KEY)
+        if network_semaphore is None:
+            network_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EVN_REQUESTS)
+            domain_data[NETWORK_SEMAPHORE_DATA_KEY] = network_semaphore
+        self._network_semaphore: asyncio.Semaphore = network_semaphore
         self._backfill_lock = asyncio.Lock()
         self._invoice_lock = asyncio.Lock()
         self._invoice_rescan_lock = asyncio.Lock()
@@ -76,6 +86,30 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._history_backfill_complete = False
         self._zalo_baseline_ready = False
         self.zalo = ZaloNotifier(hass, entry, database, self.invoice_dir)
+
+    async def _async_api_call(self, method: Any, /, *args: Any, **kwargs: Any) -> Any:
+        """Run one EVN cloud call through the domain-wide concurrency gate.
+
+        Multiple config entries often point at the same EVN regional gateway.
+        Limiting the whole integration, rather than each meter independently,
+        prevents startup/history refreshes from opening dozens of simultaneous
+        requests and causing avoidable upstream timeouts.
+        """
+        if self.hass.is_stopping:
+            raise asyncio.CancelledError
+        async with self._network_semaphore:
+            return await method(*args, **kwargs)
+
+    async def _async_login_with_retry(self) -> bool:
+        """Authenticate with one short retry for transient transport failures."""
+        for attempt in range(2):
+            if await self._async_api_call(self.api.login):
+                return True
+            if self.api.last_login_auth_failed or self.hass.is_stopping:
+                return False
+            if attempt == 0:
+                await asyncio.sleep(0.75)
+        return False
 
     async def async_initialize(self) -> None:
         """Prepare local storage and load cache without any network request."""
@@ -123,7 +157,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         executor.
         """
         async with self._api_lock:
-            if not self.api.access_token and not await self.api.login():
+            if not self.api.access_token and not await self._async_login_with_retry():
                 if self.api.last_login_auth_failed:
                     raise ConfigEntryAuthFailed("EVN authentication failed")
                 raise UpdateFailed(
@@ -152,14 +186,15 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         async with self._api_lock:
             results = await asyncio.gather(
-                self.api.get_chisothang(*current_month),
-                self.api.get_chisothang(*previous_month),
-                self.api.get_hoadon(),
-                self.api.get_ngungcapdien(
+                self._async_api_call(self.api.get_chisothang, *current_month),
+                self._async_api_call(self.api.get_chisothang, *previous_month),
+                self._async_api_call(self.api.get_hoadon),
+                self._async_api_call(
+                    self.api.get_ngungcapdien,
                     outage_window_start.strftime("%d/%m/%Y"),
                     outage_window_end.strftime("%d/%m/%Y"),
                 ),
-                self.api.get_thongbao(),
+                self._async_api_call(self.api.get_thongbao),
                 return_exceptions=True,
             )
         current_month_data, previous_month_data, bill_data, outage_data, notifications = results
@@ -171,7 +206,10 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             item is not None and not isinstance(item, Exception) for item in results
         )
         if not daily_ok and not cloud_results_ok:
-            raise UpdateFailed("All EVN data endpoints were unavailable")
+            raise UpdateFailed(
+                "All EVN data endpoints were unavailable",
+                retry_after=FAILED_REFRESH_RETRY_SECONDS,
+            )
 
         await self._async_process_monthly_result(
             "monthly_current", current_month_data, *current_month, errors
@@ -391,7 +429,8 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 current_start + timedelta(days=DAILY_BATCH_DAYS - 1), now
             )
             async with self._api_lock:
-                response = await self.api.get_chisongay(
+                response = await self._async_api_call(
+                    self.api.get_chisongay,
                     current_start.strftime("%d/%m/%Y"),
                     current_end.strftime("%d/%m/%Y"),
                 )
@@ -486,7 +525,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Authenticate once before the slower import. Every API method still
         # handles token expiry itself, and all cloud requests share _api_lock.
         async with self._api_lock:
-            if not self.api.access_token and not await self.api.login():
+            if not self.api.access_token and not await self._async_login_with_retry():
                 _LOGGER.warning(
                     "History bootstrap paused for %s: EVN login unavailable (%s)",
                     self.customer_id,
@@ -522,7 +561,9 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         continue
                     try:
                         async with self._api_lock:
-                            result = await self.api.get_chisothang(month, year)
+                            result = await self._async_api_call(
+                                self.api.get_chisothang, month, year
+                            )
                         if self.api.last_login_auth_failed:
                             _LOGGER.warning(
                                 "History bootstrap stopped for %s because EVN authentication expired",
@@ -619,7 +660,8 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # without creating a missing-consumption gap at batch boundaries.
                 request_start = current_start - timedelta(days=1)
                 async with self._api_lock:
-                    response = await self.api.get_chisongay(
+                    response = await self._async_api_call(
+                        self.api.get_chisongay,
                         request_start.strftime("%d/%m/%Y"),
                         current_end.strftime("%d/%m/%Y"),
                     )
@@ -1153,8 +1195,10 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for kind, value in candidates:
                     content: bytes | None
                     if kind == "url":
-                        content = await self.api.download_file(
-                            value, base_url=resource_base_url
+                        content = await self._async_api_call(
+                            self.api.download_file,
+                            value,
+                            base_url=resource_base_url,
                         )
                     elif kind == "base64":
                         content = decode_base64_payload(value)

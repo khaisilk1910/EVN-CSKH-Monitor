@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 import logging
 import re
@@ -43,6 +44,8 @@ from .const import (
     DEFAULT_ZALO_SEND_OUTAGE,
     DEFAULT_ZALO_TYPE,
     DOMAIN,
+    MAX_CONCURRENT_EVN_REQUESTS,
+    NETWORK_SEMAPHORE_DATA_KEY,
     REGION_CPC,
     REGION_HCMC,
     REGION_HN,
@@ -307,13 +310,23 @@ class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             customer_id,
         )
         try:
-            if not await api.login():
-                return "invalid_auth" if api.last_login_auth_failed else "cannot_connect"
-            now = dt_util.now()
-            start = now - timedelta(days=7)
-            response = await api.get_chisongay(
-                start.strftime("%d/%m/%Y"), now.strftime("%d/%m/%Y")
-            )
+            domain_data = self.hass.data.setdefault(DOMAIN, {})
+            network_semaphore = domain_data.get(NETWORK_SEMAPHORE_DATA_KEY)
+            if network_semaphore is None:
+                network_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EVN_REQUESTS)
+                domain_data[NETWORK_SEMAPHORE_DATA_KEY] = network_semaphore
+            async with network_semaphore:
+                if not await api.login():
+                    return (
+                        "invalid_auth"
+                        if api.last_login_auth_failed
+                        else "cannot_connect"
+                    )
+                now = dt_util.now()
+                start = now - timedelta(days=7)
+                response = await api.get_chisongay(
+                    start.strftime("%d/%m/%Y"), now.strftime("%d/%m/%Y")
+                )
             if response is None:
                 return "cannot_connect"
             if isinstance(response, dict) and response.get("data") is None:

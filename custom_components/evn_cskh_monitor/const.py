@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "evn_cskh_monitor"
 NAME = "EVN CSKH Monitor"
-VERSION = "2026.8.27.5"
+VERSION = "2026.8.27.6"
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 # Connection/config-entry data.
@@ -112,7 +112,27 @@ HISTORY_BATCH_PAUSE_SECONDS = 0.25
 HISTORY_MONTH_PAUSE_SECONDS = 0.20
 
 # HTTP/network behavior.
-REQUEST_TIMEOUT_SECONDS = 30
+#
+# EVN regional gateways occasionally accept the TCP/TLS connection quickly but
+# take longer to produce response headers.  Keep a bounded total timeout so a
+# dead upstream can never hold a coordinator forever, while allowing a little
+# more headroom than the old flat 30-second timeout.  Connection failures still
+# fail fast via the dedicated connect timeout.
+REQUEST_TIMEOUT_SECONDS = 45
+REQUEST_CONNECT_TIMEOUT_SECONDS = 10
+REQUEST_READ_TIMEOUT_SECONDS = 30
+
+# A Home Assistant instance can contain several EVN meters.  Without a domain-
+# wide limiter each coordinator could start five lookup requests at once after
+# startup, creating a thundering herd against the same EVN gateway.  Three
+# concurrent cloud calls keeps refreshes responsive without flooding EVN.
+MAX_CONCURRENT_EVN_REQUESTS = 3
+NETWORK_SEMAPHORE_DATA_KEY = "network_semaphore"
+
+# If every current-data endpoint is unavailable, retry sooner than the normal
+# one-hour polling cadence.  Home Assistant's current DataUpdateCoordinator
+# understands UpdateFailed(retry_after=...).
+FAILED_REFRESH_RETRY_SECONDS = 10 * 60
 
 # Web panel/API paths are unique to this integration. Only the webui subfolder is
 # exposed as static content; the SQLite database and invoice files remain private.
