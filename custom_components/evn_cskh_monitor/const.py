@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "evn_cskh_monitor"
 NAME = "EVN CSKH Monitor"
-VERSION = "2026.8.27.4"
+VERSION = "2026.8.27.5"
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 # Connection/config-entry data.

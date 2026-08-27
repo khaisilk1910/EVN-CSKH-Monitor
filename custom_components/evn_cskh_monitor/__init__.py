@@ -11,7 +11,7 @@ import tempfile
 from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
@@ -182,11 +182,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> b
     # If an entry is added/reloaded while HA is already running, async_at_started
     # invokes this callback immediately. The refresh itself remains an
     # entry-owned background task and is cancelled automatically on unload.
-    def _schedule_initial_refresh(_: HomeAssistant) -> None:
+    @callback
+    def _schedule_initial_refresh(started_hass: HomeAssistant) -> None:
+        """Schedule the first cloud refresh from Home Assistant's event loop.
+
+        ``async_at_started`` wraps synchronous callables in ``HassJob``.  A
+        plain synchronous function is treated as an executor job, which means
+        calling ``ConfigEntry.async_create_background_task`` from it is unsafe:
+        that API must run on Home Assistant's event-loop thread.  Marking this
+        function with ``@callback`` keeps it on the loop.
+
+        ``eager_start=False`` is equally intentional.  When a config entry is
+        added/reloaded while Home Assistant is already running,
+        ``async_at_started`` invokes the callback during ``async_setup_entry``.
+        Deferring the coroutine until the next loop iteration lets Home
+        Assistant mark the entry LOADED first and avoids re-entrant cloud work
+        during config-entry setup.
+        """
+        if started_hass.is_stopping:
+            return
         entry.async_create_background_task(
             hass,
             coordinator.async_refresh(),
             name=f"{DOMAIN} initial refresh {entry.entry_id}",
+            eager_start=False,
         )
 
     entry.async_on_unload(async_at_started(hass, _schedule_initial_refresh))

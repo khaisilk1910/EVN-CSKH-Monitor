@@ -116,9 +116,11 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Refresh EVN data.
 
-        This method is only launched as a config-entry background task for the
-        first refresh, so a slow EVN server cannot delay Home Assistant startup.
-        SQLite work is always sent to the executor.
+        The first cloud refresh is launched as a config-entry background task
+        only after Home Assistant has started; later calls come from the normal
+        DataUpdateCoordinator interval.  Therefore a slow EVN server cannot
+        delay config-entry/startup setup. SQLite work is always sent to the
+        executor.
         """
         async with self._api_lock:
             if not self.api.access_token and not await self.api.login():
@@ -204,24 +206,32 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Do not emit Zalo notifications while the initial historical import is
         # running. The importer seeds all current fingerprints when it finishes,
         # so old bills/outages/production are treated as baseline rather than new.
-        if self._zalo_baseline_ready and self._invoice_rescan_complete:
-            self.entry.async_create_background_task(
-                self.hass,
-                self._async_process_zalo(snapshot),
-                name=f"evn_cskh_monitor zalo {self.customer_id}",
-            )
-        if not self._invoice_rescan_complete:
-            self.entry.async_create_background_task(
-                self.hass,
-                self.async_rescan_stored_invoice_attachments(),
-                name=f"evn_cskh_monitor invoice recovery {self.customer_id}",
-            )
-        if not self._history_backfill_complete or not self._zalo_baseline_ready:
-            self.entry.async_create_background_task(
-                self.hass,
-                self.async_backfill_history(),
-                name=f"evn_cskh_monitor history retry {self.customer_id}",
-            )
+        # Do not create more work once shutdown has begun.  These jobs are all
+        # config-entry-owned and therefore cancelled by Home Assistant on unload.
+        # Deferring them one event-loop turn also lets the coordinator publish
+        # the freshly returned snapshot before optional slow follow-up work starts.
+        if not self.hass.is_stopping:
+            if self._zalo_baseline_ready and self._invoice_rescan_complete:
+                self.entry.async_create_background_task(
+                    self.hass,
+                    self._async_process_zalo(snapshot),
+                    name=f"evn_cskh_monitor zalo {self.customer_id}",
+                    eager_start=False,
+                )
+            if not self._invoice_rescan_complete:
+                self.entry.async_create_background_task(
+                    self.hass,
+                    self.async_rescan_stored_invoice_attachments(),
+                    name=f"evn_cskh_monitor invoice recovery {self.customer_id}",
+                    eager_start=False,
+                )
+            if not self._history_backfill_complete or not self._zalo_baseline_ready:
+                self.entry.async_create_background_task(
+                    self.hass,
+                    self.async_backfill_history(),
+                    name=f"evn_cskh_monitor history retry {self.customer_id}",
+                    eager_start=False,
+                )
 
         return snapshot
 
