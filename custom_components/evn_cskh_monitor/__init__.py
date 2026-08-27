@@ -5,14 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import Any
+import shutil
 
 from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.start import async_at_started
+from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_CUSTOMER_ID,
@@ -27,13 +28,14 @@ from .const import (
     PLATFORMS,
     VERSION,
     WEBUI_DIR_NAME,
+    WEBUI_SETTINGS_DATA_KEY,
     WEBUI_URL_PREFIX,
 )
 from .coordinator import EVNDataUpdateCoordinator
 from .database import EVNDatabase
 from .evn_api import EVNAPI
 from .views import async_register_views
-from .webui_deployer import ensure_webui_assets, prepare_webui_directory
+from .webui_settings import EVNWebUISettingsManager
 
 _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -52,31 +54,46 @@ class EVNCSKHRuntimeData:
 type EVNCSKHConfigEntry = ConfigEntry[EVNCSKHRuntimeData]
 
 
+def _sync_webui_assets(source: Path, destination: Path, version: str) -> None:
+    """Copy packaged WebUI assets into /config/evncskh/webui when needed.
 
-async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
+    This runs in Home Assistant's executor. Only the dedicated webui subfolder
+    is later exposed by the static route, so the database, raw data and invoice
+    files in /config/evncskh are never made public by that route.
+    """
+    marker = destination / ".version"
+    if (
+        marker.is_file()
+        and marker.read_text(encoding="utf-8").strip() == version
+        and (destination / "panel.js").is_file()
+    ):
+        return
+
+    # Replace the generated WebUI directory on version changes instead of
+    # merging it. This removes stale prerelease assets (including the old
+    # iframe/token based frontend) and guarantees that /config/evncskh/webui
+    # exactly matches the integration version being executed.
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
+    marker.write_text(version, encoding="utf-8")
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up domain-level authenticated WebUI resources once."""
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if WEBUI_SETTINGS_DATA_KEY not in domain_data:
+        settings_manager = EVNWebUISettingsManager(hass)
+        await settings_manager.async_load()
+        domain_data[WEBUI_SETTINGS_DATA_KEY] = settings_manager
+
+    source_webui = Path(__file__).parent / "webui"
     data_dir = Path(hass.config.path(DATA_DIR_NAME))
     webui_dir = data_dir / WEBUI_DIR_NAME
 
-    # StaticPathConfig expects a real directory on first install. Creating the
-    # empty runtime directory is the only filesystem operation awaited here and
-    # it runs in the executor. Decompression/writes are deliberately background
-    # work so they never hold up Home Assistant startup.
-    await hass.async_add_executor_job(prepare_webui_directory, webui_dir)
-
-    # Deploy/update the runtime WebUI without blocking startup. On ordinary
-    # restarts this performs only a marker read + three stat checks and writes
-    # nothing. A version change (including a HACS update) or missing asset causes
-    # an atomic redeploy into /config/evncskh/webui only.
-    async def _async_ensure_webui() -> None:
-        try:
-            await hass.async_add_executor_job(ensure_webui_assets, webui_dir, VERSION)
-        except Exception:  # noqa: BLE001 - background deployment must not break HA
-            _LOGGER.exception("Unable to deploy EVN CSKH Monitor WebUI runtime")
-
-    hass.async_create_background_task(
-        _async_ensure_webui(),
-        f"{DOMAIN} webui deployment",
+    # Keep all potentially blocking filesystem operations off the event loop.
+    await hass.async_add_executor_job(
+        _sync_webui_assets, source_webui, webui_dir, VERSION
     )
 
     # panel.js is cache-busted by VERSION in module_url, so static caching is
@@ -138,15 +155,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> b
     # If an entry is added/reloaded while HA is already running, async_at_started
     # invokes this callback immediately. The refresh itself remains an
     # entry-owned background task and is cancelled automatically on unload.
-    @callback
     def _schedule_initial_refresh(_: HomeAssistant) -> None:
-        # async_at_started wraps callbacks in HassJob. Without @callback a
-        # normal synchronous function is classified as an executor job, which
-        # would run this code in a worker thread. Creating an asyncio task from
-        # that thread uses the wrong running loop on current Home Assistant.
-        # Marking it as an event-loop callback keeps task creation thread-safe.
-        if hass.is_stopping:
-            return
         entry.async_create_background_task(
             hass,
             coordinator.async_refresh(),
@@ -170,9 +179,10 @@ async def _async_update_listener(
 ) -> None:
     """Apply option changes cheaply and reload only connection changes.
 
-    Billing/Zalo/WebUI options are read dynamically, so reloading the whole
-    config entry would unnecessarily restart the EVN client and launch another
-    cloud refresh. Credential or region changes still require a full reload.
+    Billing/Zalo options are read dynamically, so reloading the whole config
+    entry would unnecessarily restart the EVN client and launch another cloud
+    refresh. Domain-wide WebUI settings are stored separately and never reload
+    a meter. Credential or region changes still require a full reload.
     """
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
@@ -191,5 +201,5 @@ async def _async_update_listener(
         return
 
     # Re-render cached sensors immediately for billing-period option changes.
-    # ZaloNotifier and WebUI endpoints read entry.options on demand as well.
+    # ZaloNotifier reads its per-meter entry.options on demand.
     runtime.coordinator.async_update_listeners()

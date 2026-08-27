@@ -7,7 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
-from homeassistant.components.http import HomeAssistantView
+from homeassistant.components.http import HomeAssistantView, require_admin
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
@@ -17,14 +17,19 @@ from .const import (
     CONF_CUSTOMER_ID,
     CONF_NGAYDAUKY,
     CONF_WEBUI_SUBTITLE,
+    CONF_WEBUI_THEME,
     CONF_WEBUI_TITLE,
     DEFAULT_NGAYDAUKY,
-    DEFAULT_WEBUI_SUBTITLE,
-    DEFAULT_WEBUI_TITLE,
     DOMAIN,
     NAME,
+    WEBUI_THEMES,
 )
 from .naming import device_display_name
+from .webui_settings import (
+    WEBUI_SUBTITLE_MAX_LENGTH,
+    WEBUI_TITLE_MAX_LENGTH,
+    webui_settings_manager,
+)
 
 
 def _runtime_for_account(hass: HomeAssistant, account: str):
@@ -45,12 +50,6 @@ def _json_number(value: Any) -> float | None:
         return None
 
 
-def _webui_settings(entry) -> tuple[str, str]:
-    title = str(entry.options.get(CONF_WEBUI_TITLE, DEFAULT_WEBUI_TITLE)).strip()
-    subtitle = str(entry.options.get(CONF_WEBUI_SUBTITLE, DEFAULT_WEBUI_SUBTITLE)).strip()
-    return title or DEFAULT_WEBUI_TITLE, subtitle
-
-
 class EVNPingView(HomeAssistantView):
     url = f"{API_URL_PREFIX}/ping"
     name = "api:evn_cskh_monitor:ping"
@@ -67,6 +66,8 @@ class EVNOptionsView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         hass: HomeAssistant = request.app["hass"]
+        settings = webui_settings_manager(hass).as_dict()
+        user = request["hass_user"]
         accounts: list[dict[str, Any]] = []
         for entry in hass.config_entries.async_entries(DOMAIN):
             customer_id = str(entry.data.get(CONF_CUSTOMER_ID, "")).strip().upper()
@@ -74,7 +75,6 @@ class EVNOptionsView(HomeAssistantView):
                 continue
             runtime = getattr(entry, "runtime_data", None)
             customer = runtime.coordinator.data.get("customer", {}) if runtime else {}
-            webui_title, webui_subtitle = _webui_settings(entry)
             accounts.append(
                 {
                     "id": customer_id,
@@ -89,18 +89,76 @@ class EVNOptionsView(HomeAssistantView):
                             entry.data.get(CONF_NGAYDAUKY, DEFAULT_NGAYDAUKY),
                         )
                     ),
-                    "webui_title": webui_title,
-                    "webui_subtitle": webui_subtitle,
+                    # Kept on each account for backwards compatibility with
+                    # older copies of panel.js; values are now domain-wide.
+                    "webui_title": settings[CONF_WEBUI_TITLE],
+                    "webui_subtitle": settings[CONF_WEBUI_SUBTITLE],
+                    "webui_theme": settings[CONF_WEBUI_THEME],
                 }
             )
         accounts.sort(key=lambda item: str(item["name"]).casefold())
         return web.json_response(
             {
                 "accounts": accounts,
+                "webui": settings,
+                "webui_themes": list(WEBUI_THEMES),
+                "can_edit_webui": bool(user.is_admin),
                 # Kept for backwards compatibility with the prerelease WebUI.
                 "accounts_json": json.dumps(accounts, ensure_ascii=False),
             }
         )
+
+
+class EVNWebUISettingsView(HomeAssistantView):
+    """Read/update one global WebUI configuration for the whole integration."""
+
+    url = f"{API_URL_PREFIX}/webui-settings"
+    name = "api:evn_cskh_monitor:webui_settings"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+        user = request["hass_user"]
+        return web.json_response(
+            {
+                "settings": webui_settings_manager(hass).as_dict(),
+                "themes": list(WEBUI_THEMES),
+                "can_edit": bool(user.is_admin),
+            }
+        )
+
+    @require_admin
+    async def post(self, request: web.Request) -> web.Response:
+        hass: HomeAssistant = request.app["hass"]
+
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return web.json_response({"error": "invalid_json"}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({"error": "invalid_payload"}, status=400)
+
+        manager = webui_settings_manager(hass)
+        merged: dict[str, Any] = manager.as_dict()
+        for key in (CONF_WEBUI_TITLE, CONF_WEBUI_SUBTITLE, CONF_WEBUI_THEME):
+            if key not in payload:
+                continue
+            if not isinstance(payload[key], str):
+                return web.json_response({"error": f"invalid_{key}"}, status=400)
+            merged[key] = payload[key]
+
+        title = str(merged.get(CONF_WEBUI_TITLE, "")).strip()
+        subtitle = str(merged.get(CONF_WEBUI_SUBTITLE, "")).strip()
+        theme = str(merged.get(CONF_WEBUI_THEME, "")).strip()
+        if len(title) > WEBUI_TITLE_MAX_LENGTH:
+            return web.json_response({"error": "title_too_long"}, status=400)
+        if len(subtitle) > WEBUI_SUBTITLE_MAX_LENGTH:
+            return web.json_response({"error": "subtitle_too_long"}, status=400)
+        if theme not in WEBUI_THEMES:
+            return web.json_response({"error": "invalid_theme"}, status=400)
+
+        settings = await manager.async_update(merged)
+        return web.json_response({"settings": settings, "can_edit": True})
 
 
 class EVNMonthlyDataView(HomeAssistantView):
@@ -177,12 +235,13 @@ class EVNSummaryView(HomeAssistantView):
 
         snapshot = runtime.coordinator.data
         customer = dict(snapshot.get("customer", {}))
-        webui_title, webui_subtitle = _webui_settings(entry)
+        settings = webui_settings_manager(hass).as_dict()
         customer.update(
             {
                 "device_name": device_display_name(hass, entry, account),
-                "webui_title": webui_title,
-                "webui_subtitle": webui_subtitle,
+                "webui_title": settings[CONF_WEBUI_TITLE],
+                "webui_subtitle": settings[CONF_WEBUI_SUBTITLE],
+                "webui_theme": settings[CONF_WEBUI_THEME],
             }
         )
 
@@ -251,6 +310,7 @@ def async_register_views(hass: HomeAssistant) -> None:
     """Register integration API views once during domain setup."""
     hass.http.register_view(EVNPingView)
     hass.http.register_view(EVNOptionsView)
+    hass.http.register_view(EVNWebUISettingsView)
     hass.http.register_view(EVNMonthlyDataView)
     hass.http.register_view(EVNDailyDataView)
     hass.http.register_view(EVNSummaryView)

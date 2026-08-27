@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "evn_cskh_monitor"
 NAME = "EVN CSKH Monitor"
-VERSION = "2026.8.26.2134"
+VERSION = "2026.8.27.1"
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 # Connection/config-entry data.
@@ -17,10 +17,14 @@ CONF_PASSWORD = "password"
 CONF_CUSTOMER_ID = "customer_id"
 CONF_REGION = "region"
 
-# User-adjustable options.
+# User-adjustable per-meter options.
 CONF_NGAYDAUKY = "ngaydauky"
+
+# Domain-wide WebUI settings. These are intentionally NOT config-entry options,
+# because one EVN CSKH Monitor panel is shared by every configured meter.
 CONF_WEBUI_TITLE = "webui_title"
 CONF_WEBUI_SUBTITLE = "webui_subtitle"
+CONF_WEBUI_THEME = "webui_theme"
 
 # Multi-recipient Zalo configuration. Each item in CONF_ZALO_RECIPIENTS is a
 # serializable dict so Home Assistant can persist it in the config entry options.
@@ -40,6 +44,19 @@ CONF_CONFIRM_DELETE = "confirm_delete"
 DEFAULT_NGAYDAUKY = 1
 DEFAULT_WEBUI_TITLE = NAME
 DEFAULT_WEBUI_SUBTITLE = "Dữ liệu EVN, hóa đơn, sản lượng và lịch cắt điện"
+DEFAULT_WEBUI_THEME = "midnight_sapphire"
+WEBUI_THEMES = (
+    "midnight_sapphire",
+    "obsidian_gold",
+    "emerald_noir",
+    "aurora_violet",
+    "crimson_velvet",
+    "arctic_platinum",
+    "ocean_neon",
+    "graphite_copper",
+    "royal_indigo",
+    "cyber_teal",
+)
 DEFAULT_ZALO_TYPE = 0
 DEFAULT_ZALO_ACCOUNT_SELECTION = ""
 DEFAULT_ZALO_THREAD_ID = ""
@@ -74,6 +91,9 @@ DATA_DIR_NAME = "evncskh"
 DB_FILENAME = "evncskh.db"
 INVOICES_DIR_NAME = "Invoices"
 WEBUI_DIR_NAME = "webui"
+WEBUI_SETTINGS_DATA_KEY = "webui_settings_manager"
+WEBUI_STORAGE_KEY = f"{DOMAIN}.webui"
+WEBUI_STORAGE_VERSION = 1
 
 # Polling cadence. EVN daily readings normally change once per day, while bills
 # and outage notifications may change independently. One-hour polling is a good
@@ -93,10 +113,6 @@ HISTORY_MONTH_PAUSE_SECONDS = 0.20
 
 # HTTP/network behavior.
 REQUEST_TIMEOUT_SECONDS = 30
-# The outage schedule endpoint is optional and has a notification fallback.
-# Keep its timeout shorter so a slow EVN outage service cannot hold the whole
-# coordinator refresh for the full general request timeout.
-OUTAGE_REQUEST_TIMEOUT_SECONDS = 15
 
 # Web panel/API paths are unique to this integration. Only the webui subfolder is
 # exposed as static content; the SQLite database and invoice files remain private.

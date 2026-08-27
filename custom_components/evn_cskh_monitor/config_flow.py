@@ -38,8 +38,6 @@ from .const import (
     CONF_ZALO_TYPE,
     CUSTOMER_ID_PREFIX_REGION,
     DEFAULT_NGAYDAUKY,
-    DEFAULT_WEBUI_SUBTITLE,
-    DEFAULT_WEBUI_TITLE,
     DEFAULT_ZALO_SEND_DAILY,
     DEFAULT_ZALO_SEND_INVOICE,
     DEFAULT_ZALO_SEND_OUTAGE,
@@ -128,14 +126,6 @@ def _general_options_schema(current: dict[str, Any], data: dict[str, Any]) -> vo
                     mode=selector.NumberSelectorMode.SLIDER,
                 )
             ),
-            vol.Required(
-                CONF_WEBUI_TITLE,
-                default=str(current.get(CONF_WEBUI_TITLE, DEFAULT_WEBUI_TITLE)),
-            ): selector.TextSelector(selector.TextSelectorConfig()),
-            vol.Optional(
-                CONF_WEBUI_SUBTITLE,
-                default=str(current.get(CONF_WEBUI_SUBTITLE, DEFAULT_WEBUI_SUBTITLE)),
-            ): selector.TextSelector(selector.TextSelectorConfig()),
         }
     )
 
@@ -362,11 +352,15 @@ class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
     async def async_step_general(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Edit billing-period and WebUI settings."""
+        """Edit per-meter billing-period settings."""
         current = dict(self.config_entry.options)
         if user_input is not None:
             merged = dict(current)
             merged.update(user_input)
+            # WebUI title/subtitle moved to one domain-wide Store in 2026.8.27.1.
+            # Remove stale per-meter values the next time this form is saved.
+            merged.pop(CONF_WEBUI_TITLE, None)
+            merged.pop(CONF_WEBUI_SUBTITLE, None)
             return self.async_create_entry(title="", data=merged)
         return self.async_show_form(
             step_id="general",

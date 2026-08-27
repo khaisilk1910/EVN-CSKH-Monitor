@@ -16,6 +16,7 @@ from .const import (
     CONF_ZALO_RECIPIENTS,
     CONF_ZALO_THREAD_ID,
 )
+from .webui_settings import webui_settings_manager
 
 _REDACT_ENTRY = {CONF_USERNAME, CONF_PASSWORD, CONF_CUSTOMER_ID}
 _REDACT_OPTIONS = {CONF_ZALO_ACCOUNT_SELECTION, CONF_ZALO_THREAD_ID, CONF_ZALO_RECIPIENTS}
@@ -31,6 +32,7 @@ async def async_get_config_entry_diagnostics(
     return {
         "entry": async_redact_data(dict(entry.data), _REDACT_ENTRY),
         "options": async_redact_data(dict(entry.options), _REDACT_OPTIONS),
+        "webui": webui_settings_manager(hass).as_dict(),
         "customer": customer,
         "last_sync": snapshot.get("last_sync"),
         "partial_errors": snapshot.get("partial_errors", []),

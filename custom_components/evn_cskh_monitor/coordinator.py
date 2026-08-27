@@ -35,12 +35,11 @@ from .invoice import (
     is_invoice_notification,
     iter_attachment_candidates,
 )
-from .invoice_render import render_pdf_first_page_png
 from .zalo import ZaloNotifier
 
 _LOGGER = logging.getLogger(__name__)
 
-_INVOICE_RESCAN_STATE_KEY = "invoice_attachment_rescan_v4"
+_INVOICE_RESCAN_STATE_KEY = "invoice_attachment_rescan_v3"
 
 
 class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -247,11 +246,7 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             stored = await self.hass.async_add_executor_job(
                 self.database.load_invoice_source_records, self.customer_id
             )
-            recovered = await self.hass.async_add_executor_job(
-                _render_missing_invoice_previews,
-                self.invoice_dir,
-                self.customer_id,
-            )
+            recovered = 0
             for source, payload in stored:
                 try:
                     if source == "bill":
@@ -1142,15 +1137,6 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         _valid_invoice_file, path, ext
                     ):
                         already_valid.add(ext)
-                if "pdf" in already_valid and "png" not in already_valid:
-                    pdf_path = self.invoice_dir / f"{self.customer_id}_{month}_{year}.pdf"
-                    preview_created = await self.hass.async_add_executor_job(
-                        _render_invoice_preview_file,
-                        pdf_path,
-                    )
-                    if preview_created:
-                        already_valid.add("png")
-                        saved += 1
                 if len(already_valid) == 2:
                     continue
 
@@ -1187,75 +1173,19 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         continue
 
                     path = self.invoice_dir / f"{self.customer_id}_{month}_{year}.{detected}"
-                    preview_created = await self.hass.async_add_executor_job(
-                        _persist_invoice_and_preview,
-                        path,
-                        content,
-                        detected,
+                    await self.hass.async_add_executor_job(
+                        _write_bytes_atomic, path, content
                     )
                     already_valid.add(detected)
                     saved += 1
-                    if preview_created:
-                        already_valid.add("png")
-                        saved += 1
                     _LOGGER.info(
-                        "Saved official EVN %s invoice attachment %s%s",
+                        "Saved official EVN %s invoice attachment %s",
                         source_hint,
                         path,
-                        " and generated PNG preview" if preview_created else "",
                     )
                     if len(already_valid) == 2:
                         break
         return saved
-
-
-def _persist_invoice_and_preview(path: Path, content: bytes, detected: str) -> bool:
-    """Persist an official invoice and render a PNG preview for PDF input."""
-    _write_bytes_atomic(path, content)
-    if detected != "pdf":
-        return False
-
-    png_path = path.with_suffix(".png")
-    if _valid_invoice_file(png_path, "png"):
-        return False
-    png = render_pdf_first_page_png(content)
-    if detect_invoice_type(png) != "png":
-        return False
-    _write_bytes_atomic(png_path, png)
-    return True
-
-
-def _render_invoice_preview_file(pdf_path: Path) -> bool:
-    """Render one existing official invoice PDF to its sibling PNG path."""
-    if not _valid_invoice_file(pdf_path, "pdf"):
-        return False
-    png_path = pdf_path.with_suffix(".png")
-    if _valid_invoice_file(png_path, "png"):
-        return False
-    try:
-        content = pdf_path.read_bytes()
-    except OSError:
-        return False
-    png = render_pdf_first_page_png(content)
-    if detect_invoice_type(png) != "png":
-        return False
-    try:
-        _write_bytes_atomic(png_path, png)
-    except OSError as err:
-        _LOGGER.debug("Could not write EVN invoice PNG preview %s: %s", png_path, err)
-        return False
-    return True
-
-
-def _render_missing_invoice_previews(invoice_dir: Path, customer_id: str) -> int:
-    """Create PNG previews for already-downloaded official PDF invoices."""
-    if not invoice_dir.is_dir():
-        return 0
-    created = 0
-    for pdf_path in sorted(invoice_dir.glob(f"{customer_id}_*_*.pdf")):
-        if _render_invoice_preview_file(pdf_path):
-            created += 1
-    return created
 
 
 def _prepare_invoice_directory(data_dir: Path, invoice_dir: Path) -> int:
