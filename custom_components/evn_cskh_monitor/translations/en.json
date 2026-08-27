@@ -54,26 +54,22 @@
         "title": "EVN CSKH Monitor options",
         "description": "Choose what you want to manage.",
         "menu_options": {
-          "general": "General and WebUI",
+          "general": "Billing period",
           "zalo_accounts": "Zalo destinations"
         },
         "menu_option_descriptions": {
-          "general": "Billing cycle and WebUI title.",
+          "general": "Billing start day for this meter. WebUI title, subtitle and theme are edited in the WebUI and shared by the whole integration.",
           "zalo_accounts": "Add, edit, or delete multiple Zalo Bot sender/destination routes."
         }
       },
       "general": {
-        "title": "General and WebUI",
-        "description": "These changes apply immediately and do not reconnect to EVN.",
+        "title": "Billing period",
+        "description": "This setting applies only to the current meter and takes effect immediately without reconnecting to EVN.",
         "data": {
-          "ngaydauky": "Billing period start day",
-          "webui_title": "WebUI title",
-          "webui_subtitle": "WebUI subtitle"
+          "ngaydauky": "Billing period start day"
         },
         "data_description": {
-          "ngaydauky": "Day 1-31. A day beyond the month length is clamped to the final day.",
-          "webui_title": "Title shown at the upper-left of the EVN CSKH Monitor panel.",
-          "webui_subtitle": "Small description under the WebUI title; it may be blank."
+          "ngaydauky": "Day 1-31. A day beyond the month length is clamped to the final day."
         }
       },
       "zalo_accounts": {

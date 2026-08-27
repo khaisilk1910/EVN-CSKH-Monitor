@@ -54,26 +54,22 @@
         "title": "Tùy chọn EVN CSKH Monitor",
         "description": "Chọn phần bạn muốn quản lý.",
         "menu_options": {
-          "general": "Cấu hình chung và WebUI",
+          "general": "Chu kỳ điện",
           "zalo_accounts": "Tài khoản / nơi nhận Zalo"
         },
         "menu_option_descriptions": {
-          "general": "Chu kỳ điện và tiêu đề WebUI.",
+          "general": "Ngày bắt đầu kỳ điện của riêng công tơ này. Tiêu đề, mô tả và theme WebUI được chỉnh trực tiếp trong WebUI và dùng chung cho toàn bộ tích hợp.",
           "zalo_accounts": "Thêm, sửa, xóa nhiều cấu hình Zalo Bot để gửi thông báo."
         }
       },
       "general": {
-        "title": "Cấu hình chung và WebUI",
-        "description": "Các thay đổi này áp dụng ngay, không cần đăng nhập EVN lại.",
+        "title": "Chu kỳ điện",
+        "description": "Thiết lập này áp dụng riêng cho công tơ hiện tại và có hiệu lực ngay, không cần đăng nhập EVN lại.",
         "data": {
-          "ngaydauky": "Ngày bắt đầu kỳ điện",
-          "webui_title": "Tiêu đề WebUI",
-          "webui_subtitle": "Mô tả dưới tiêu đề WebUI"
+          "ngaydauky": "Ngày bắt đầu kỳ điện"
         },
         "data_description": {
-          "ngaydauky": "Ngày 1-31; nếu tháng ngắn hơn sẽ tự dùng ngày cuối tháng.",
-          "webui_title": "Tên hiển thị ở góc trên bên trái trang EVN CSKH Monitor.",
-          "webui_subtitle": "Dòng mô tả nhỏ bên dưới tiêu đề, có thể để trống."
+          "ngaydauky": "Ngày 1-31; nếu tháng ngắn hơn sẽ tự dùng ngày cuối tháng."
         }
       },
       "zalo_accounts": {
