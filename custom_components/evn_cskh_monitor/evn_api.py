@@ -1087,12 +1087,32 @@ class EVNAPI:
             _LOGGER.error(f"get_chisothang error: {e}", exc_info=True)
             return None
 
-    async def get_hoadon(self) -> Optional[Dict[str, Any]]:
-        """Get bill information.
-        
-        Returns:
-            Dict with data or None
+    async def get_hoadon(
+        self, month: int | None = None, year: int | None = None
+    ) -> Optional[Dict[str, Any]]:
+        """Get bill information, optionally for one explicit billing period.
+
+        The common HN/NPC/CPC gateway accepts the same meter identity and
+        ``MM/YYYY`` range fields used by the monthly lookup.  Supplying a
+        period is important for paid/historical bills: the legacy no-body call
+        is kept for the normal current debt/bill refresh, while a targeted call
+        explicitly asks EVN for the selected month.
+
+        HCMC/SPC currently expose debt/status endpoints here rather than a
+        historical invoice archive, so callers must not request a period for
+        those regions.
         """
+        if (month is None) != (year is None):
+            raise ValueError("month and year must be supplied together")
+        if month is not None and (not 1 <= month <= 12 or year is None or not 2000 <= year <= 2100):
+            raise ValueError("invalid invoice month/year")
+        if month is not None and self.region in {"HCMC", "SPC"}:
+            _LOGGER.debug(
+                "Historical invoice period lookup is not available through %s get_hoadon",
+                self.region,
+            )
+            return None
+
         if not self.access_token:
             if not await self.login():
                 return None
@@ -1183,7 +1203,10 @@ class EVNAPI:
                     return {"data": data}
                 return data
             else:
-                # Các region khác dùng endpoint chung
+                # HN/NPC/CPC share the common EVN lookup endpoint. The old
+                # no-body request is preserved for the live bill/debt refresh.
+                # For history, explicitly send the requested period instead of
+                # assuming the endpoint will return already-paid invoices.
                 url = f"{self.base_url}/api/evn/tracuu/hoadon"
 
                 headers = {
@@ -1193,10 +1216,28 @@ class EVNAPI:
                     "authorization": f"Bearer {self.access_token}",
                 }
 
+                payload: dict[str, Any] | None = None
+                if month is not None and year is not None:
+                    ma_dviqly, ma_ddo = self._get_ma_dviqly_and_ma_ddo()
+                    thang_nam = f"{month:02d}/{year}"
+                    payload = {
+                        "MA_DVIQLY": ma_dviqly,
+                        "MA_DDO": ma_ddo,
+                        "TU_THANG_NAM": thang_nam,
+                        "DEN_THANG_NAM": thang_nam,
+                    }
+                    _LOGGER.debug(
+                        "get_hoadon historical: period=%s customer=%s region=%s",
+                        thang_nam,
+                        self.customer_id,
+                        self.region,
+                    )
+
                 return await self._request_json_with_reauth(
                     "POST",
                     url,
                     headers=headers,
+                    json_body=payload,
                 )
 
         except (TimeoutError, aiohttp.ClientError) as err:
@@ -1459,6 +1500,22 @@ class EVNAPI:
                 await asyncio.sleep(0.75)
 
     @property
+    def invoice_resource_base_url(self) -> str:
+        """Return the endpoint URL used to resolve relative bill attachments."""
+        if self.region == "HCMC":
+            return f"{self.base_url}/Tracuu/kiemTraNo"
+        if self.region == "SPC":
+            return f"{self.base_url}/api/NghiepVu/TraCuuNoHoaDon"
+        return f"{self.base_url}/api/evn/tracuu/hoadon"
+
+    @property
+    def monthly_resource_base_url(self) -> str:
+        """Return the response endpoint for resolving monthly relative links."""
+        if self.region in {"HCMC", "SPC"}:
+            return f"{self.base_url.rstrip('/')}/"
+        return f"{self.base_url}/api/evn/tracuu/chisothang"
+
+    @property
     def notification_resource_base_url(self) -> str:
         """Return the source endpoint used to resolve notification attachments."""
         if self.region == "SPC":
@@ -1513,7 +1570,7 @@ class EVNAPI:
     async def _download_file_url(
         self, url: str, *, visited: set[str], depth: int
     ) -> bytes | None:
-        if depth > 2 or url in visited:
+        if depth > 3 or url in visited:
             return None
         visited.add(url)
         session = await self._get_session()
