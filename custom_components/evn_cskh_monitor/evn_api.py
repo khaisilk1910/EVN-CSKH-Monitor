@@ -25,6 +25,16 @@ from .invoice import (
     extract_invoice_links_from_html,
     iter_attachment_candidates,
 )
+from .evnhanoi_invoice import (
+    EVNHANOI_INVOICE_REFERER,
+    EVNHANOI_WEB_BASE,
+    find_management_unit as find_hanoi_management_unit,
+    invoice_identity as hanoi_invoice_identity,
+    invoice_rows as hanoi_invoice_rows,
+    management_unit_candidates as hanoi_management_unit_candidates,
+    normalize_invoice_row as normalize_hanoi_invoice_row,
+    pdf_base64 as hanoi_pdf_base64,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,6 +60,15 @@ SPC_LOGIN_URL = "https://api.cskh.evnspc.vn/api/user/authenticate"
 # trả về mọi mã khách hàng của cùng số điện thoại nên phải lọc theo mã đang cấu
 # hình (xem coordinator._save_notification_outages).
 NOTIFICATION_URL = "https://cskh.evn.com.vn/cskh/v1/notification/getAllByUser"
+
+# EVNHANOI's current Angular frontend authenticates its same-origin API calls
+# with a dedicated JWT obtained from apicskh.evnhanoi.vn/connect/token.  This is
+# separate from the common EVN app token above.  The values below are the public
+# OAuth password-grant client settings shipped in EVNHANOI's own frontend bundle.
+EVNHANOI_WEB_TOKEN_URL = "https://apicskh.evnhanoi.vn/connect/token"
+EVNHANOI_WEB_CLIENT_ID = "httplocalhost4500"
+EVNHANOI_WEB_CLIENT_SECRET = "secret"
+EVNHANOI_WEB_AUTH_RETRY_COOLDOWN_SECONDS = 60
 
 _EVN_AUTH_SUFFIXES = (
     ".evn.com.vn",
@@ -81,6 +100,13 @@ class EVNAPI:
             sock_read=REQUEST_READ_TIMEOUT_SECONDS,
         )
         self._login_lock = asyncio.Lock()
+        # EVNHANOI's website archive uses its own JWT, independent from the
+        # common EVN application token. Keep it isolated so a 401 on the web
+        # archive can never overwrite the normal integration access token.
+        self._hanoi_web_login_lock = asyncio.Lock()
+        self._hanoi_web_access_token: Optional[str] = None
+        self._hanoi_web_auth_username: Optional[str] = None
+        self._hanoi_web_login_failed_at = 0.0
         self._transport_log_times: dict[str, float] = {}
         self.last_login_auth_failed = False
         self.last_login_error: str | None = None
@@ -91,6 +117,12 @@ class EVNAPI:
         self.dien_thoai: Optional[str] = None  # Số điện thoại, từ login response
         self.dia_chi: Optional[str] = None  # Địa chỉ, từ login response
         self.hcmc_session: Optional[str] = None  # Session cookie cho HCMC
+        # EVNHANOI website invoice APIs use a management-unit code such as
+        # HN0300, which is NOT derivable from the customer-id prefix. Resolve it
+        # from the authenticated contract list once and keep it in memory.
+        self._hanoi_web_ma_dviqly: Optional[str] = None
+        self._hanoi_web_management_unit_verified = False
+        self._hanoi_common_ma_dviqly_hint: Optional[str] = None
 
         if not self.base_url:
             raise ValueError(f"Invalid region: {region}")
@@ -104,6 +136,8 @@ class EVNAPI:
     async def close(self) -> None:
         """Release local references; Home Assistant owns the shared session."""
         self._session = None
+        self._hanoi_web_access_token = None
+        self._hanoi_web_auth_username = None
 
     def _log_transport_failure(self, operation: str, err: BaseException) -> None:
         """Log expected EVN network failures without traceback spam.
@@ -233,6 +267,21 @@ class EVNAPI:
                 self.ten_khang = user_data.get("tenKhang")
                 self.dien_thoai = user_data.get("dthoai")
                 self.dia_chi = user_data.get("diaChi")
+                if self.region == "HN":
+                    candidate_unit = (
+                        user_data.get("maDonViQuanLy")
+                        or user_data.get("maDviqly")
+                        or user_data.get("maDviQLY")
+                        or user_data.get("maDviQly")
+                    )
+                    if candidate_unit:
+                        # Preserve the stable 2026.9.4.7 common-login side effect
+                        # while also retaining it as a non-authoritative invoice
+                        # hint. The archive resolver below will not trust this
+                        # value until the exact contract/invoice row verifies it.
+                        resolved_unit = str(candidate_unit).strip().upper()
+                        self._hanoi_web_ma_dviqly = resolved_unit
+                        self._hanoi_common_ma_dviqly_hint = resolved_unit
                 
                 # Với HN: không dùng maDviqly/maHdong từ login,
                 # sẽ dùng customer_id trực tiếp
@@ -465,6 +514,21 @@ class EVNAPI:
                 self.ten_khang = switch_user_data.get("tenKhang")
                 self.dien_thoai = switch_user_data.get("dthoai")
                 self.dia_chi = switch_user_data.get("diaChi")
+                if self.region == "HN":
+                    candidate_unit = (
+                        switch_user_data.get("maDonViQuanLy")
+                        or switch_user_data.get("maDviqly")
+                        or switch_user_data.get("maDviQLY")
+                        or switch_user_data.get("maDviQly")
+                    )
+                    if candidate_unit:
+                        # Preserve the stable 2026.9.4.7 common-login side effect
+                        # while also retaining it as a non-authoritative invoice
+                        # hint. The archive resolver below will not trust this
+                        # value until the exact contract/invoice row verifies it.
+                        resolved_unit = str(candidate_unit).strip().upper()
+                        self._hanoi_web_ma_dviqly = resolved_unit
+                        self._hanoi_common_ma_dviqly_hint = resolved_unit
                 
                 # Với HN: không lưu ma_dviqly/ma_ddo, sẽ dùng customer_id trực tiếp trong API calls
                 # Với NPC/CPC/SPC: dùng maKhang để extract
@@ -1086,6 +1150,545 @@ class EVNAPI:
         except Exception as e:
             _LOGGER.error(f"get_chisothang error: {e}", exc_info=True)
             return None
+
+    def _hanoi_web_headers(self) -> dict[str, str]:
+        """Return headers used by EVNHANOI's authenticated website API.
+
+        Chrome HAR exports commonly redact sensitive Authorization headers. The
+        EVNHANOI Angular bundle shows that every same-origin API request receives
+        ``Authorization: Bearer <localStorage token>`` through its JWT
+        interceptor.  Therefore the archive API needs a dedicated web JWT rather
+        than the common EVN app token.
+        """
+        headers = {
+            "accept": "application/json",
+            "user-agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/152.0.0.0 Safari/537.36"
+            ),
+            "referer": EVNHANOI_INVOICE_REFERER,
+        }
+        if self._hanoi_web_access_token:
+            headers["authorization"] = f"Bearer {self._hanoi_web_access_token}"
+        return headers
+
+    def _warn_hanoi_web(self, message: str, *args: Any) -> None:
+        """Emit one actionable warning at most every 15 minutes."""
+        now = monotonic()
+        key = "evnhanoi_web_warning"
+        last = self._transport_log_times.get(key, 0.0)
+        if now - last < 15 * 60:
+            return
+        self._transport_log_times[key] = now
+        _LOGGER.warning(message, *args)
+
+    def _hanoi_web_username_candidates(
+        self, preferred_username: str | None = None
+    ) -> list[str]:
+        """Return bounded EVNHANOI login candidates for this meter.
+
+        The EVN app credential can differ from the website's historical login
+        name. HAR captures show ``userNameOld`` may be either lower- or
+        upper-case customer ID, so try only the configured username and the
+        current customer ID spellings. This is intentionally small to avoid
+        unnecessary authentication attempts.
+        """
+        candidates: list[str] = []
+        if preferred_username is not None:
+            preferred = str(preferred_username or "").strip()
+            raw_values = [
+                preferred,
+                preferred.upper(),
+                preferred.lower(),
+            ]
+        else:
+            raw_values = [
+                self._hanoi_web_auth_username,
+                self.username,
+                self.customer_id,
+                str(self.customer_id or "").lower(),
+            ]
+        for value in raw_values:
+            candidate = str(value or "").strip()
+            if not candidate:
+                continue
+            if candidate not in candidates:
+                candidates.append(candidate)
+        return candidates[:4]
+
+    async def _login_hanoi_web(
+        self,
+        *,
+        force: bool = False,
+        preferred_username: str | None = None,
+    ) -> bool:
+        """Authenticate to EVNHANOI's website API with meter-aware fallback."""
+        if self.region != "HN":
+            return False
+        if (
+            self._hanoi_web_access_token
+            and not force
+            and (
+                preferred_username is None
+                or preferred_username == self._hanoi_web_auth_username
+            )
+        ):
+            return True
+
+        async with self._hanoi_web_login_lock:
+            if (
+                self._hanoi_web_access_token
+                and not force
+                and (
+                    preferred_username is None
+                    or preferred_username == self._hanoi_web_auth_username
+                )
+            ):
+                return True
+
+            now = monotonic()
+            if (
+                not force
+                and self._hanoi_web_login_failed_at
+                and now - self._hanoi_web_login_failed_at
+                < EVNHANOI_WEB_AUTH_RETRY_COOLDOWN_SECONDS
+            ):
+                return False
+
+            session = await self._get_session()
+            headers = {
+                "accept": "application/json, text/plain, */*",
+                "content-type": "application/x-www-form-urlencoded",
+                "user-agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/152.0.0.0 Safari/537.36"
+                ),
+                "referer": EVNHANOI_INVOICE_REFERER,
+            }
+
+            last_status: int | None = None
+            last_error_text = ""
+            for auth_username in self._hanoi_web_username_candidates(
+                preferred_username
+            ):
+                form = {
+                    "username": auth_username,
+                    "password": self.password,
+                    "grant_type": "password",
+                    "client_id": EVNHANOI_WEB_CLIENT_ID,
+                    "client_secret": EVNHANOI_WEB_CLIENT_SECRET,
+                }
+                try:
+                    async with session.post(
+                        EVNHANOI_WEB_TOKEN_URL,
+                        data=form,
+                        headers=headers,
+                        timeout=self._timeout,
+                    ) as resp:
+                        last_status = resp.status
+                        if resp.status != 200:
+                            last_error_text = (await resp.text())[:160].replace(
+                                "\n", " "
+                            )
+                            continue
+                        try:
+                            payload = await resp.json(content_type=None)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            last_error_text = "invalid JSON"
+                            continue
+                except asyncio.CancelledError:
+                    raise
+                except (TimeoutError, aiohttp.ClientError) as err:
+                    self._log_transport_failure("EVNHANOI web login", err)
+                    last_error_text = (
+                        "timeout" if isinstance(err, TimeoutError) else str(err)
+                    )
+                    continue
+
+                token = payload.get("access_token") if isinstance(payload, dict) else None
+                if not isinstance(token, str) or not token.strip():
+                    last_error_text = "no access_token"
+                    continue
+
+                self._hanoi_web_access_token = token.strip()
+                self._hanoi_web_auth_username = auth_username
+                self._hanoi_web_login_failed_at = 0.0
+                return True
+
+            self._hanoi_web_access_token = None
+            self._hanoi_web_auth_username = None
+            self._hanoi_web_login_failed_at = monotonic()
+            self._warn_hanoi_web(
+                "EVNHANOI web invoice login failed for %s after bounded "
+                "configured/customer-id attempts: %s%s",
+                self.customer_id,
+                f"HTTP {last_status} " if last_status is not None else "",
+                last_error_text or "authentication unavailable",
+            )
+            return False
+
+    async def _hanoi_web_request_json(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> Any | None:
+        """GET one EVNHANOI website API resource with bounded retry/reauth."""
+        if not await self._login_hanoi_web():
+            return None
+
+        session = await self._get_session()
+        transient_retries = 0
+        auth_refreshed = False
+        while True:
+            try:
+                async with session.get(
+                    url,
+                    params=params,
+                    headers=self._hanoi_web_headers(),
+                    timeout=self._timeout,
+                ) as resp:
+                    if resp.status in (401, 403) and not auth_refreshed:
+                        auth_refreshed = True
+                        previous_username = self._hanoi_web_auth_username
+                        self._hanoi_web_access_token = None
+                        if not await self._login_hanoi_web(
+                            force=True,
+                            preferred_username=previous_username,
+                        ):
+                            return None
+                        continue
+
+                    if resp.status in {408, 429, 500, 502, 503, 504}:
+                        if transient_retries < 1 and not self.hass.is_stopping:
+                            transient_retries += 1
+                            retry_after = 0.75
+                            header = resp.headers.get("Retry-After")
+                            if header:
+                                try:
+                                    retry_after = min(
+                                        max(float(header), 0.25), 2.0
+                                    )
+                                except ValueError:
+                                    pass
+                            resp.release()
+                            await asyncio.sleep(retry_after)
+                            continue
+
+                    if resp.status != 200:
+                        text = await resp.text()
+                        self._warn_hanoi_web(
+                            "EVNHANOI invoice API failed for %s: HTTP %s %s",
+                            self.customer_id,
+                            resp.status,
+                            text[:160].replace("\n", " "),
+                        )
+                        return None
+
+                    try:
+                        return await resp.json(content_type=None)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        text = await resp.text()
+                        try:
+                            return json.loads(text)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            self._warn_hanoi_web(
+                                "EVNHANOI invoice API returned invalid JSON for %s",
+                                self.customer_id,
+                            )
+                            return None
+            except asyncio.CancelledError:
+                raise
+            except (TimeoutError, aiohttp.ClientError) as err:
+                if transient_retries >= 1 or self.hass.is_stopping:
+                    self._log_transport_failure("EVNHANOI invoice API", err)
+                    self._warn_hanoi_web(
+                        "EVNHANOI invoice API is unavailable for %s: %s",
+                        self.customer_id,
+                        "timeout" if isinstance(err, TimeoutError) else str(err),
+                    )
+                    return None
+                transient_retries += 1
+                await asyncio.sleep(0.75)
+
+    async def _get_hanoi_web_management_unit(self) -> str | None:
+        """Resolve the real HNxxxx unit for this exact meter.
+
+        Prefer an exact ``maKhachHang`` match from the authenticated contract
+        list. If the configured EVN-app username authenticates a different
+        website identity, retry the website JWT with this meter's customer ID
+        (both original/lower-case forms are handled by the login helper). This
+        mirrors how EVNHANOI historically treats customer IDs as website login
+        names and avoids binding invoice lookup to whichever meter happened to
+        be the default account.
+        """
+        if (
+            self._hanoi_web_ma_dviqly
+            and self._hanoi_web_management_unit_verified
+        ):
+            return self._hanoi_web_ma_dviqly
+
+        contract_url = (
+            f"{EVNHANOI_WEB_BASE}/api/TraCuu/GetDanhSachHopDongByUserName"
+        )
+
+        responses: list[Any] = []
+        response = await self._hanoi_web_request_json(contract_url)
+        if response is not None:
+            responses.append(response)
+            unit = find_hanoi_management_unit(response, self.customer_id)
+            if unit:
+                self._hanoi_web_ma_dviqly = unit
+                self._hanoi_web_management_unit_verified = True
+                return unit
+
+        # A common EVN/app username can be valid while the EVNHANOI historical
+        # portal expects the meter/customer ID as its own login name. Re-auth
+        # specifically as the target meter before giving up.
+        current_auth = str(self._hanoi_web_auth_username or "").strip()
+        target = str(self.customer_id or "").strip()
+        if target and current_auth.casefold() != target.casefold():
+            self._hanoi_web_access_token = None
+            if await self._login_hanoi_web(
+                force=True,
+                preferred_username=target,
+            ):
+                response = await self._hanoi_web_request_json(contract_url)
+                if response is not None:
+                    responses.append(response)
+                    unit = find_hanoi_management_unit(response, self.customer_id)
+                    if unit:
+                        self._hanoi_web_ma_dviqly = unit
+                        self._hanoi_web_management_unit_verified = True
+                        return unit
+
+        # Controlled fallback: if every contract response points to one unique
+        # HN management unit, use it as a probe candidate. The subsequent
+        # GetThongTinHoaDon call still includes the exact target customer ID, so
+        # no invoice from another meter can be persisted by this fallback.
+        candidates: list[str] = []
+        for item in responses:
+            for unit in hanoi_management_unit_candidates(item, self.customer_id):
+                if unit and unit not in candidates:
+                    candidates.append(unit)
+        common_unit = str(
+            self._hanoi_common_ma_dviqly_hint or ""
+        ).strip().upper()
+        if common_unit and common_unit not in candidates:
+            candidates.append(common_unit)
+
+        if len(candidates) == 1:
+            self._hanoi_web_ma_dviqly = candidates[0]
+            self._hanoi_web_management_unit_verified = False
+            _LOGGER.info(
+                "EVNHANOI using unique management-unit candidate %s for %s",
+                candidates[0],
+                self.customer_id,
+            )
+            return candidates[0]
+
+        self._warn_hanoi_web(
+            "EVNHANOI contract list did not expose an unambiguous management "
+            "unit for %s; historical invoice scan cannot continue",
+            self.customer_id,
+        )
+        return None
+
+    async def async_validate_hanoi_web_customer(self) -> bool:
+        """Validate this exact HN customer using EVNHANOI's independent portal.
+
+        This is a config-flow resilience fallback only. It never replaces the
+        normal EVN app token used for consumption/monthly APIs. A unique-unit
+        probe is insufficient here: setup succeeds only when the authenticated
+        contract list explicitly contains this customer ID.
+        """
+        if self.region != "HN":
+            return False
+
+        # Force a fresh exact resolution for the current validation attempt.
+        self._hanoi_web_ma_dviqly = None
+        self._hanoi_web_management_unit_verified = False
+        unit = await self._get_hanoi_web_management_unit()
+        return bool(unit and self._hanoi_web_management_unit_verified)
+
+    async def _get_hanoi_invoice_pdf_base64(
+        self,
+        *,
+        ma_dviqly: str,
+        customer_id: str,
+        invoice_id: int,
+        invoice_type: str,
+    ) -> str | None:
+        """Fetch one official PDF using identifiers from that invoice row."""
+        response = await self._hanoi_web_request_json(
+            f"{EVNHANOI_WEB_BASE}/api/Cmis/XemHoaDonByMaKhachHang",
+            params={
+                "maDvql": ma_dviqly,
+                "maKh": customer_id,
+                "idHoaDon": int(invoice_id),
+                "loaiHoaDon": invoice_type or "TD",
+            },
+        )
+        return hanoi_pdf_base64(response)
+
+    async def _get_hanoi_invoice_period(
+        self, month: int, year: int
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve and download one EVNHANOI invoice period dynamically.
+
+        No invoice identifier is hard-coded. ``maDonViQuanLy`` is resolved for
+        the configured meter, then ``GetThongTinHoaDon`` supplies the unique
+        ``idHdon``/customer/type for each invoice row. Those row identifiers are
+        passed unchanged to ``XemHoaDonByMaKhachHang``.
+        """
+        ma_dviqly = await self._get_hanoi_web_management_unit()
+        if not ma_dviqly:
+            return None
+
+        response = await self._hanoi_web_request_json(
+            f"{EVNHANOI_WEB_BASE}/api/TraCuu/GetThongTinHoaDon",
+            params={
+                "maDvql": ma_dviqly,
+                "maKh": self.customer_id,
+                "thang": int(month),
+                "nam": int(year),
+                "ky": 1,
+            },
+        )
+        if response is None:
+            return None
+
+        rows = hanoi_invoice_rows(response)
+        if not rows and not self._hanoi_web_management_unit_verified:
+            # A fallback unit that is not tied to this exact customer cannot
+            # authoritatively prove that the period has no invoice.
+            return None
+
+        normalized_rows: list[dict[str, Any]] = []
+        wanted_customer = str(self.customer_id or "").strip().upper()
+        for row in rows:
+            (
+                row_unit,
+                row_customer,
+                invoice_id,
+                invoice_type,
+            ) = hanoi_invoice_identity(
+                row,
+                fallback_customer_id=self.customer_id,
+                fallback_management_unit=ma_dviqly,
+            )
+
+            # Never persist a row for a different meter even if a shared-account
+            # endpoint unexpectedly returns more than the requested customer.
+            if row_customer and row_customer != wanted_customer:
+                _LOGGER.warning(
+                    "EVNHANOI invoice row customer mismatch for %s: got %s; "
+                    "row ignored",
+                    self.customer_id,
+                    row_customer,
+                )
+                continue
+
+            if row_unit:
+                # The invoice row is the most authoritative source for the unit
+                # used by the PDF endpoint; keep it for later periods as well.
+                self._hanoi_web_ma_dviqly = row_unit
+                self._hanoi_web_management_unit_verified = True
+
+            pdf_payload: str | None = None
+            if invoice_id > 0 and row_unit and row_customer:
+                try:
+                    pdf_payload = await self._get_hanoi_invoice_pdf_base64(
+                        ma_dviqly=row_unit,
+                        customer_id=row_customer,
+                        invoice_id=invoice_id,
+                        invoice_type=invoice_type,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except (TimeoutError, aiohttp.ClientError) as err:
+                    self._log_transport_failure(
+                        f"get_hanoi_invoice_pdf {int(month):02d}/{int(year)}", err
+                    )
+                except Exception as err:  # noqa: BLE001 - best-effort attachment fetch
+                    _LOGGER.debug(
+                        "EVNHANOI PDF lookup failed for %s invoice %s: %s",
+                        self.customer_id,
+                        invoice_id,
+                        err,
+                    )
+            normalized_rows.append(normalize_hanoi_invoice_row(row, pdf_payload))
+
+        return {
+            "data": normalized_rows,
+            "_invoice_archive": "evnhanoi_web",
+            "_management_unit": self._hanoi_web_ma_dviqly or ma_dviqly,
+        }
+
+    async def get_hoadon_period(self, month: int, year: int) -> Optional[Dict[str, Any]]:
+        """Query one historical invoice period without changing current debt.
+
+        HN uses the exact two-step EVNHANOI website flow captured in the user's
+        HAR: GetThongTinHoaDon -> XemHoaDonByMaKhachHang (base64 PDF). NPC/CPC
+        retain the existing regional gateway lookup.
+        """
+        if not (1 <= int(month) <= 12 and 2000 <= int(year) <= 2100):
+            raise ValueError("Invalid invoice month/year")
+        if self.region not in {"HN", "NPC", "CPC"}:
+            return None
+
+        try:
+            if self.region == "HN":
+                # The EVNHANOI archive uses its own website JWT; do not make it
+                # depend on the common EVN app gateway being healthy.
+                return await self._get_hanoi_invoice_period(int(month), int(year))
+
+            if not self.access_token and not await self.login():
+                return None
+
+            url = f"{self.base_url}/api/evn/tracuu/hoadon"
+            ma_dviqly, ma_ddo = self._get_ma_dviqly_and_ma_ddo()
+            thang_nam = f"{int(month):02d}/{int(year)}"
+            payload = {
+                "MA_DVIQLY": ma_dviqly,
+                "MA_DDO": ma_ddo,
+                "TU_THANG_NAM": thang_nam,
+                "DEN_THANG_NAM": thang_nam,
+            }
+            headers = {
+                "accept": "application/json, text/plain, */*",
+                "content-type": "application/json",
+                "user-agent": "okhttp/4.12.0",
+                "authorization": f"Bearer {self.access_token}",
+            }
+            return await self._request_json_with_reauth(
+                "POST", url, headers=headers, json_body=payload
+            )
+        except (TimeoutError, aiohttp.ClientError) as err:
+            self._log_transport_failure(
+                f"get_hoadon_period {int(month):02d}/{int(year)}", err
+            )
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            _LOGGER.error(
+                "get_hoadon_period %02d/%s failed: %s",
+                int(month),
+                int(year),
+                err,
+                exc_info=True,
+            )
+            return None
+
+    @property
+    def invoice_resource_base_url(self) -> str:
+        """Return the period-query base used for relative attachment links."""
+        if self.region == "HN":
+            return f"{EVNHANOI_WEB_BASE}/api/TraCuu/GetThongTinHoaDon"
+        return f"{self.base_url.rstrip('/')}/api/evn/tracuu/hoadon"
 
     async def get_hoadon(self) -> Optional[Dict[str, Any]]:
         """Get bill information.

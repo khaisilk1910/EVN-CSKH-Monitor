@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "evn_cskh_monitor"
 NAME = "EVN CSKH Monitor"
-VERSION = "2026.9.4.2"
+VERSION = "2026.9.4.9"
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 # Connection/config-entry data.
@@ -130,6 +130,16 @@ REQUEST_READ_TIMEOUT_SECONDS = 30
 # concurrent cloud calls keeps refreshes responsive without flooding EVN.
 MAX_CONCURRENT_EVN_REQUESTS = 3
 NETWORK_SEMAPHORE_DATA_KEY = "network_semaphore"
+
+# Login/authentication is more fragile than normal lookup traffic on the EVN
+# gateways. Serialize only LOGIN operations across config entries while
+# leaving ordinary data requests at the normal concurrency of three. This
+# prevents several meters plus a config-flow validation from hitting the
+# common auth service at exactly the same time after restart.
+MAX_CONCURRENT_EVN_LOGINS = 1
+LOGIN_SEMAPHORE_DATA_KEY = "login_semaphore"
+LOGIN_RETRY_DELAY_SECONDS = 1.5
+LOGIN_FAILED_REFRESH_RETRY_SECONDS = 5 * 60
 
 # If every current-data endpoint is unavailable, retry sooner than the normal
 # one-hour polling cadence.  Home Assistant's current DataUpdateCoordinator

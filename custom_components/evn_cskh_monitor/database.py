@@ -476,6 +476,7 @@ class EVNDatabase:
                     OR source='notifications'
                     OR source LIKE 'monthly_%'
                     OR source LIKE 'history_month_%'
+                    OR source LIKE 'invoice_period_%'
                   )
                 ORDER BY fetched_at DESC
                 LIMIT ?

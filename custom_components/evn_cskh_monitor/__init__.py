@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
 import logging
 from pathlib import Path
 import shutil
@@ -184,32 +185,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> b
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Do not start EVN network traffic until Home Assistant has fully started.
-    # If an entry is added/reloaded while HA is already running, async_at_started
-    # invokes this callback immediately. The refresh itself remains an
-    # entry-owned background task and is cancelled automatically on unload.
+    # The initial invoice bootstrap is chained after the first coordinator
+    # refresh, but runs even when that refresh is partially/unavailable. This
+    # makes adding/reloading a meter deterministic: archive recovery no longer
+    # depends on reaching the end of _async_update_data().
+    async def _async_initial_cloud_work() -> None:
+        try:
+            await coordinator.async_refresh()
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # DataUpdateCoordinator normally contains this.
+            _LOGGER.warning(
+                "Initial EVN refresh raised unexpectedly for %s: %s",
+                customer_id,
+                err,
+            )
+
+        if hass.is_stopping:
+            return
+        if api.region in {"HN", "NPC", "CPC"}:
+            try:
+                await coordinator.async_bootstrap_current_year_invoices()
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - keep setup task supervised
+                _LOGGER.warning(
+                    "Initial current-year invoice scan failed for %s: %s",
+                    customer_id,
+                    err,
+                    exc_info=True,
+                )
+
     @callback
     def _schedule_initial_refresh(started_hass: HomeAssistant) -> None:
-        """Schedule the first cloud refresh from Home Assistant's event loop.
-
-        ``async_at_started`` wraps synchronous callables in ``HassJob``.  A
-        plain synchronous function is treated as an executor job, which means
-        calling ``ConfigEntry.async_create_background_task`` from it is unsafe:
-        that API must run on Home Assistant's event-loop thread.  Marking this
-        function with ``@callback`` keeps it on the loop.
-
-        ``eager_start=False`` is equally intentional.  When a config entry is
-        added/reloaded while Home Assistant is already running,
-        ``async_at_started`` invokes the callback during ``async_setup_entry``.
-        Deferring the coroutine until the next loop iteration lets Home
-        Assistant mark the entry LOADED first and avoids re-entrant cloud work
-        during config-entry setup.
-        """
+        """Schedule initial cloud refresh + invoice bootstrap on the HA loop."""
         if started_hass.is_stopping:
             return
         entry.async_create_background_task(
             hass,
-            coordinator.async_refresh(),
-            name=f"{DOMAIN} initial refresh {entry.entry_id}",
+            _async_initial_cloud_work(),
+            name=f"{DOMAIN} initial cloud work {entry.entry_id}",
             eager_start=False,
         )
 

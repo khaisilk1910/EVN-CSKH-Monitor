@@ -24,6 +24,10 @@ from .const import (
     HISTORY_MONTH_PAUSE_SECONDS,
     HISTORY_PREVIOUS_YEARS,
     INVOICES_DIR_NAME,
+    LOGIN_FAILED_REFRESH_RETRY_SECONDS,
+    LOGIN_RETRY_DELAY_SECONDS,
+    LOGIN_SEMAPHORE_DATA_KEY,
+    MAX_CONCURRENT_EVN_LOGINS,
     MAX_CONCURRENT_EVN_REQUESTS,
     NETWORK_SEMAPHORE_DATA_KEY,
     RECENT_BOOTSTRAP_DAYS,
@@ -32,6 +36,7 @@ from .const import (
 )
 from .database import EVNDatabase, parse_number
 from .evn_api import EVNAPI
+from .evnhanoi_invoice import strip_binary_payloads
 from .invoice import (
     decode_base64_payload,
     detect_invoice_type,
@@ -43,7 +48,8 @@ from .zalo import ZaloNotifier
 
 _LOGGER = logging.getLogger(__name__)
 
-_INVOICE_RESCAN_STATE_KEY = "invoice_attachment_rescan_v3"
+_INVOICE_RESCAN_STATE_KEY = "invoice_attachment_rescan_v4"
+_INVOICE_ARCHIVE_PERIOD_STATE_PREFIX = "invoice_archive_period_v3"
 
 
 class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -79,9 +85,28 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             network_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EVN_REQUESTS)
             domain_data[NETWORK_SEMAPHORE_DATA_KEY] = network_semaphore
         self._network_semaphore: asyncio.Semaphore = network_semaphore
+
+        # The common EVN auth endpoint is notably more sensitive to bursts
+        # than the data gateways. Keep the 2026.9.4.7 login request itself
+        # unchanged, but serialize login operations across all meters so a
+        # Home Assistant restart or config-flow submit cannot launch several
+        # simultaneous /auth/login calls and trigger avoidable 504/timeouts.
+        login_semaphore = domain_data.get(LOGIN_SEMAPHORE_DATA_KEY)
+        if login_semaphore is None:
+            login_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EVN_LOGINS)
+            domain_data[LOGIN_SEMAPHORE_DATA_KEY] = login_semaphore
+        self._login_semaphore: asyncio.Semaphore = login_semaphore
+
         self._backfill_lock = asyncio.Lock()
         self._invoice_lock = asyncio.Lock()
         self._invoice_rescan_lock = asyncio.Lock()
+        # Notification-triggered single-period recovery and the full current-year
+        # bootstrap are different jobs.  They must not share the same "already
+        # running" gate: in 2026.9.4.5 a notification task could acquire
+        # _invoice_period_recovery_lock first, causing the full-year bootstrap to
+        # return immediately and never scan January..current month after reload.
+        self._invoice_period_recovery_lock = asyncio.Lock()
+        self._invoice_archive_bootstrap_lock = asyncio.Lock()
         self._invoice_rescan_complete = False
         self._history_backfill_complete = False
         self._zalo_baseline_ready = False
@@ -100,15 +125,30 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         async with self._network_semaphore:
             return await method(*args, **kwargs)
 
+    async def _async_login_once(self) -> bool:
+        """Run one common EVN login without creating an authentication burst."""
+        if self.hass.is_stopping:
+            raise asyncio.CancelledError
+        async with self._login_semaphore:
+            if self.hass.is_stopping:
+                raise asyncio.CancelledError
+            async with self._network_semaphore:
+                return await self.api.login()
+
     async def _async_login_with_retry(self) -> bool:
-        """Authenticate with one short retry for transient transport failures."""
+        """Use the stable .7 login path with one fair transient retry.
+
+        Authentication failures are never retried. Transport errors, timeouts
+        and upstream 5xx/504 failures receive one delayed retry, but the login
+        semaphore is released during the delay so another meter is not starved.
+        """
         for attempt in range(2):
-            if await self._async_api_call(self.api.login):
+            if await self._async_login_once():
                 return True
             if self.api.last_login_auth_failed or self.hass.is_stopping:
                 return False
             if attempt == 0:
-                await asyncio.sleep(0.75)
+                await asyncio.sleep(LOGIN_RETRY_DELAY_SECONDS)
         return False
 
     async def async_initialize(self) -> None:
@@ -161,7 +201,8 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self.api.last_login_auth_failed:
                     raise ConfigEntryAuthFailed("EVN authentication failed")
                 raise UpdateFailed(
-                    f"EVN login service unavailable: {self.api.last_login_error or 'unknown error'}"
+                    f"EVN login service unavailable: {self.api.last_login_error or 'unknown error'}",
+                    retry_after=LOGIN_FAILED_REFRESH_RETRY_SECONDS,
                 )
 
         errors: list[str] = []
@@ -270,6 +311,19 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     name=f"evn_cskh_monitor history retry {self.customer_id}",
                     eager_start=False,
                 )
+            # Historical invoice PDF recovery is independent from current debt
+            # and from notification delivery.  On every loaded meter, schedule
+            # a lightweight current-year archive scan in the background.  The
+            # worker itself skips completed periods and throttles an empty
+            # current month to once per local calendar day, so this does not
+            # add a network burst to Home Assistant startup.
+            if self.api.region in {"HN", "NPC", "CPC"}:
+                self.entry.async_create_background_task(
+                    self.hass,
+                    self.async_bootstrap_current_year_invoices(),
+                    name=f"evn_cskh_monitor invoice year {self.customer_id}",
+                    eager_start=False,
+                )
 
         return snapshot
 
@@ -320,16 +374,35 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     allow_generic_period=False,
                                     resource_base_url=self.api.notification_resource_base_url,
                                 )
-                    elif source.startswith(("monthly_", "history_month_")):
+                    elif source.startswith(("monthly_", "history_month_", "invoice_period_")):
                         fallback: tuple[int, int] | None = None
                         match = re.fullmatch(r"history_month_(20\d{2})(0[1-9]|1[0-2])", source)
                         if match:
                             fallback = (int(match.group(2)), int(match.group(1)))
+                        else:
+                            match = re.fullmatch(r"invoice_period_(20\d{2})(0[1-9]|1[0-2])", source)
+                            if match:
+                                fallback = (int(match.group(2)), int(match.group(1)))
+                        stored_records = (
+                            [payload]
+                            if isinstance(payload, dict)
+                            else [item for item in payload if isinstance(item, dict)]
+                            if isinstance(payload, list)
+                            else []
+                        )
                         recovered += await self._async_extract_invoice_files(
-                            [payload] if isinstance(payload, dict) else [],
+                            stored_records,
                             fallback_period=fallback,
-                            source_hint="stored monthly",
-                            resource_base_url=f"{self.api.base_url.rstrip('/')}/",
+                            source_hint=(
+                                "stored invoice period"
+                                if source.startswith("invoice_period_")
+                                else "stored monthly"
+                            ),
+                            resource_base_url=(
+                                self.api.invoice_resource_base_url
+                                if source.startswith("invoice_period_")
+                                else f"{self.api.base_url.rstrip('/')}/"
+                            ),
                         )
                 except asyncio.CancelledError:
                     raise
@@ -943,10 +1016,302 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     allow_generic_period=False,
                     resource_base_url=self.api.notification_resource_base_url,
                 )
+
+                # Payment-success / invoice-issued notifications commonly carry
+                # only text (for example "tháng 8 năm 2026") and no PDF URL.
+                # Once an invoice is paid, the ordinary get_hoadon() debt lookup
+                # can also become empty. Query the historical invoice archive for
+                # the exact period in an entry-owned BACKGROUND task instead of
+                # delaying the coordinator or Home Assistant startup.
+                periods: list[tuple[int, int]] = []
+                for item in invoice_notifications:
+                    period = infer_invoice_period(item, allow_generic=False)
+                    if period is not None and period not in periods:
+                        periods.append(period)
+                if (
+                    periods
+                    and self.api.region in {"HN", "NPC", "CPC"}
+                    and not self.hass.is_stopping
+                ):
+                    self.entry.async_create_background_task(
+                        self.hass,
+                        self.async_recover_invoice_periods(periods),
+                        name=f"evn_cskh_monitor invoice periods {self.customer_id}",
+                        eager_start=False,
+                    )
         if outage_rows and allow_outage_fallback:
             await self.hass.async_add_executor_job(
                 self.database.save_outages, self.customer_id, outage_rows
             )
+
+    async def async_recover_invoice_periods(
+        self, periods: list[tuple[int, int]]
+    ) -> None:
+        """Recover invoice files for explicit notification periods.
+
+        This remains a fast notification-triggered path.  The installation/
+        meter bootstrap path below performs the full current-year scan, so this
+        worker intentionally limits itself to three newest notification periods.
+        """
+        if self.api.region not in {"HN", "NPC", "CPC"}:
+            return
+        if self._invoice_period_recovery_lock.locked():
+            return
+
+        unique = sorted(
+            {
+                (int(month), int(year))
+                for month, year in periods
+                if 1 <= int(month) <= 12 and 2000 <= int(year) <= 2100
+            },
+            key=lambda item: (item[1], item[0]),
+            reverse=True,
+        )[:3]
+        if not unique:
+            return
+
+        async with self._invoice_period_recovery_lock:
+            for month, year in unique:
+                if self.hass.is_stopping:
+                    return
+                if await self.hass.async_add_executor_job(
+                    _has_valid_invoice_for_period,
+                    self.invoice_dir,
+                    self.customer_id,
+                    month,
+                    year,
+                ):
+                    continue
+                await self._async_recover_one_invoice_period(month, year)
+                await asyncio.sleep(0)
+
+    async def async_bootstrap_current_year_invoices(self) -> None:
+        """Download current-year invoices from this month back through January.
+
+        The worker is deliberately background-only and sequential.  It is
+        scheduled after a normal coordinator refresh, reuses the config-entry
+        task lifecycle, the integration-wide network semaphore and the per-entry
+        API lock, so it cannot block Home Assistant startup or create an
+        unbounded request burst.
+
+        A paid invoice is treated exactly like an unpaid invoice here: payment
+        status affects debt only, never archive/PDF eligibility.
+
+        Empty archive responses are used only as throttles, never as permanent
+        completion markers. The current month is retried daily because its bill
+        may not have been issued yet; older empty months are retried weekly so a
+        temporary EVN empty response cannot create a permanent historical gap.
+        """
+        if self.api.region not in {"HN", "NPC", "CPC"}:
+            return
+        if self._invoice_archive_bootstrap_lock.locked():
+            return
+
+        now = dt_util.now()
+        year = int(now.year)
+        today_marker = now.date().isoformat()
+        periods = [(month, year) for month in range(int(now.month), 0, -1)]
+        existing_count = 0
+        throttled_count = 0
+        attempted_count = 0
+        downloaded_count = 0
+        empty_count = 0
+        retry_count = 0
+
+        async with self._invoice_archive_bootstrap_lock:
+            for month, period_year in periods:
+                if self.hass.is_stopping:
+                    return
+
+                state_key = _invoice_archive_period_state_key(month, period_year)
+                has_file = await self.hass.async_add_executor_job(
+                    _has_valid_invoice_for_period,
+                    self.invoice_dir,
+                    self.customer_id,
+                    month,
+                    period_year,
+                )
+                if has_file:
+                    existing_count += 1
+                    await self.hass.async_add_executor_job(
+                        self.database.set_state,
+                        self.customer_id,
+                        state_key,
+                        "file",
+                    )
+                    continue
+
+                state = await self.hass.async_add_executor_job(
+                    self.database.get_state,
+                    self.customer_id,
+                    state_key,
+                )
+                if state and state.startswith("empty:"):
+                    try:
+                        last_empty = datetime.fromisoformat(
+                            state.split(":", 1)[1]
+                        ).date()
+                    except ValueError:
+                        last_empty = None
+                    if last_empty is not None:
+                        age_days = (now.date() - last_empty).days
+                        # Current month can be issued at any time, so retry it
+                        # daily. Older empty months are rechecked weekly instead
+                        # of being suppressed forever; this protects against a
+                        # temporary EVN archive returning an empty 200 response.
+                        if month == now.month and age_days < 1:
+                            throttled_count += 1
+                            continue
+                        if month < now.month and age_days < 7:
+                            throttled_count += 1
+                            continue
+
+                attempted_count += 1
+                outcome = await self._async_recover_one_invoice_period(
+                    month, period_year
+                )
+                if outcome == "file":
+                    downloaded_count += 1
+                    await self.hass.async_add_executor_job(
+                        self.database.set_state,
+                        self.customer_id,
+                        state_key,
+                        "file",
+                    )
+                elif outcome == "empty":
+                    empty_count += 1
+                    # Never turn one empty EVN response into a permanent gap.
+                    # The state is a throttle timestamp only: current month is
+                    # retried daily and older empty months are retried weekly.
+                    await self.hass.async_add_executor_job(
+                        self.database.set_state,
+                        self.customer_id,
+                        state_key,
+                        f"empty:{today_marker}",
+                    )
+
+                elif outcome == "retry":
+                    retry_count += 1
+
+                # Yield between months even though all cloud calls are already
+                # constrained by the integration-wide semaphore.
+                await asyncio.sleep(0.10)
+
+        # One compact summary makes first-install/reload behavior observable
+        # without logging every successful HTTP request.  Normal hourly refreshes
+        # where everything is already present/throttled remain at debug level.
+        if retry_count:
+            _LOGGER.warning(
+                "Current-year invoice scan incomplete for %s: year=%s, periods=%s, "
+                "attempted=%s, downloaded=%s, existing=%s, empty=%s, retry=%s, "
+                "throttled=%s",
+                self.customer_id,
+                year,
+                len(periods),
+                attempted_count,
+                downloaded_count,
+                existing_count,
+                empty_count,
+                retry_count,
+                throttled_count,
+            )
+        else:
+            log_method = (
+                _LOGGER.info
+                if attempted_count or downloaded_count
+                else _LOGGER.debug
+            )
+            log_method(
+                "Current-year invoice scan for %s: year=%s, periods=%s, attempted=%s, "
+                "downloaded=%s, existing=%s, empty=%s, retry=%s, throttled=%s",
+                self.customer_id,
+                year,
+                len(periods),
+                attempted_count,
+                downloaded_count,
+                existing_count,
+                empty_count,
+                retry_count,
+                throttled_count,
+            )
+
+    async def _async_recover_one_invoice_period(
+        self, month: int, year: int
+    ) -> str:
+        """Recover one invoice period and return file/empty/retry.
+
+        ``empty`` is returned only for a successful EVN response that contains
+        no invoice rows.  Transport/auth/server failures and an invoice row whose
+        PDF cannot yet be fetched return ``retry`` so no transient failure can
+        create a permanent gap.
+        """
+        try:
+            async with self._api_lock:
+                result = await self._async_api_call(
+                    self.api.get_hoadon_period, month, year
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - regional EVN errors vary
+            _LOGGER.debug(
+                "Invoice period lookup %02d/%s failed for %s: %s",
+                month, year, self.customer_id, err,
+            )
+            return "retry"
+
+        if result is None:
+            return "retry"
+
+        source = f"invoice_period_{year}{month:02d}"
+        # HN returns the real PDF as a large base64 string. Persist metadata only
+        # so SQLite does not grow by hundreds of KB for every invoice.
+        await self._async_save_raw(source, strip_binary_payloads(result))
+
+        rows = _invoice_rows(result)
+        if not rows:
+            _LOGGER.debug(
+                "EVN invoice archive has no invoice for %s %02d/%s",
+                self.customer_id, month, year,
+            )
+            return "empty"
+
+        # debt_fix separates invoice-history persistence from current debt; paid
+        # historical bills therefore remain safe to store here.
+        await self.hass.async_add_executor_job(
+            self.database.save_bills, self.customer_id, rows
+        )
+
+        records: list[dict[str, Any]] = []
+        if isinstance(result, dict):
+            records.append(result)
+        records.extend(rows)
+        saved = await self._async_extract_invoice_files(
+            records,
+            fallback_period=(month, year),
+            source_hint="invoice period",
+            resource_base_url=self.api.invoice_resource_base_url,
+        )
+        has_file = await self.hass.async_add_executor_job(
+            _has_valid_invoice_for_period,
+            self.invoice_dir,
+            self.customer_id,
+            month,
+            year,
+        )
+        if has_file:
+            if saved:
+                _LOGGER.info(
+                    "Recovered %s official invoice file(s) for %s %02d/%s",
+                    saved, self.customer_id, month, year,
+                )
+            return "file"
+
+        _LOGGER.debug(
+            "EVN invoice archive returned invoice metadata but no downloadable "
+            "PDF/PNG for %s %02d/%s; it will be retried",
+            self.customer_id, month, year,
+        )
+        return "retry"
 
     async def _async_save_raw(self, source: str, payload: Any) -> None:
         await self.hass.async_add_executor_job(
@@ -1240,6 +1605,39 @@ class EVNDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if len(already_valid) == 2:
                         break
         return saved
+
+
+def _invoice_rows(result: Any) -> list[dict[str, Any]]:
+    """Extract invoice rows from common EVN response envelopes."""
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    if not isinstance(result, dict):
+        return []
+    data = result.get("data")
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("HOA_DON", "hoa_don", "hoadon", "invoices", "bills"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _invoice_archive_period_state_key(month: int, year: int) -> str:
+    """Stable per-period state key for the current-year invoice archive scan."""
+    return f"{_INVOICE_ARCHIVE_PERIOD_STATE_PREFIX}_{int(year)}{int(month):02d}"
+
+
+def _has_valid_invoice_for_period(
+    invoice_dir: Path, customer_id: str, month: int, year: int
+) -> bool:
+    """Return True when at least one official PDF/PNG for the period exists."""
+    for ext in ("pdf", "png"):
+        path = invoice_dir / f"{customer_id}_{month}_{year}.{ext}"
+        if _valid_invoice_file(path, ext):
+            return True
+    return False
 
 
 def _prepare_invoice_directory(data_dir: Path, invoice_dir: Path) -> int:

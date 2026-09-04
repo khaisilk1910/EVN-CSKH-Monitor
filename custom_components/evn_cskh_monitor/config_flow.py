@@ -44,6 +44,9 @@ from .const import (
     DEFAULT_ZALO_SEND_OUTAGE,
     DEFAULT_ZALO_TYPE,
     DOMAIN,
+    LOGIN_RETRY_DELAY_SECONDS,
+    LOGIN_SEMAPHORE_DATA_KEY,
+    MAX_CONCURRENT_EVN_LOGINS,
     MAX_CONCURRENT_EVN_REQUESTS,
     NETWORK_SEMAPHORE_DATA_KEY,
     REGION_CPC,
@@ -291,11 +294,18 @@ class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def _async_validate(self, data: dict[str, Any]) -> str | None:
+        """Validate credentials/customer without amplifying EVN auth outages.
+
+        The common EVN login request intentionally remains the stable 2026.9.4.7
+        path. Login calls are serialized across all meters and receive one
+        transient retry. For HN only, if the common EVN auth/data gateway is
+        temporarily returning 504/timeout, an exact EVNHANOI website-contract
+        validation is accepted as a setup fallback. This verifies the supplied
+        credentials and customer ID without making the UI unusable during a
+        short outage of the common app-auth gateway.
+        """
         customer_id = str(data[CONF_CUSTOMER_ID]).strip().upper()
         region = str(data[CONF_REGION])
-        # Customer IDs are used in database keys and invoice filenames. Accept
-        # only the alphanumeric EVN format so malformed input cannot create
-        # unintended filesystem paths.
         if not re.fullmatch(r"[PS][A-Z][A-Z0-9]{6,30}", customer_id):
             return "invalid_customer_id"
         expected_region = CUSTOMER_ID_PREFIX_REGION.get(customer_id[:2])
@@ -311,32 +321,75 @@ class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         try:
             domain_data = self.hass.data.setdefault(DOMAIN, {})
+
             network_semaphore = domain_data.get(NETWORK_SEMAPHORE_DATA_KEY)
             if network_semaphore is None:
                 network_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EVN_REQUESTS)
                 domain_data[NETWORK_SEMAPHORE_DATA_KEY] = network_semaphore
-            async with network_semaphore:
-                if not await api.login():
-                    return (
-                        "invalid_auth"
-                        if api.last_login_auth_failed
-                        else "cannot_connect"
-                    )
+
+            login_semaphore = domain_data.get(LOGIN_SEMAPHORE_DATA_KEY)
+            if login_semaphore is None:
+                login_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EVN_LOGINS)
+                domain_data[LOGIN_SEMAPHORE_DATA_KEY] = login_semaphore
+
+            login_ok = False
+            for attempt in range(2):
+                async with login_semaphore:
+                    async with network_semaphore:
+                        login_ok = await api.login()
+                if login_ok:
+                    break
+                if api.last_login_auth_failed:
+                    return "invalid_auth"
+                if attempt == 0:
+                    await asyncio.sleep(LOGIN_RETRY_DELAY_SECONDS)
+
+            if login_ok:
                 now = dt_util.now()
                 start = now - timedelta(days=7)
-                response = await api.get_chisongay(
-                    start.strftime("%d/%m/%Y"), now.strftime("%d/%m/%Y")
-                )
-            if response is None:
-                return "cannot_connect"
-            if isinstance(response, dict) and response.get("data") is None:
-                return "no_data"
+                async with network_semaphore:
+                    response = await api.get_chisongay(
+                        start.strftime("%d/%m/%Y"), now.strftime("%d/%m/%Y")
+                    )
+                if response is not None:
+                    if isinstance(response, dict) and response.get("data") is None:
+                        # A structurally invalid response is not accepted as a
+                        # successful validation unless the HN website can prove
+                        # this exact customer/credential pair below.
+                        pass
+                    else:
+                        return None
+
+            # HN has an independent authenticated customer portal. If the common
+            # EVN app-auth/data service is temporarily unavailable, validate the
+            # exact customer against that official portal instead of rejecting a
+            # correct config entry because of an upstream 504. Bound the entire
+            # fallback so a broken website cannot leave the config dialog stuck.
+            if region == REGION_HN and not api.last_login_auth_failed:
+                try:
+                    async with asyncio.timeout(55):
+                        async with network_semaphore:
+                            if await api.async_validate_hanoi_web_customer():
+                                _LOGGER.warning(
+                                    "EVN common login/data validation is temporarily "
+                                    "unavailable for %s; setup accepted using exact "
+                                    "EVNHANOI website contract validation",
+                                    customer_id,
+                                )
+                                return None
+                except TimeoutError:
+                    _LOGGER.debug(
+                        "EVNHANOI website validation timed out for %s", customer_id
+                    )
+
+            return "cannot_connect"
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001 - regional EVN clients return varied errors
             _LOGGER.exception("EVN account validation failed")
             return "cannot_connect"
         finally:
             await api.close()
-        return None
 
     @staticmethod
     @callback
