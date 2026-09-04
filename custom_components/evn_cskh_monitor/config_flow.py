@@ -16,7 +16,6 @@ from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.util import dt as dt_util
-
 from .const import (
     CONF_CONFIRM_DELETE,
     CONF_CUSTOMER_ID,
@@ -59,9 +58,7 @@ from .zalo_config import (
     recipient_from_form,
     without_legacy_zalo_options,
 )
-
 _LOGGER = logging.getLogger(__name__)
-
 REGION_OPTIONS = [
     {"value": REGION_HN, "label": "Hà Nội (HN)"},
     {"value": REGION_NPC, "label": "Miền Bắc (NPC)"},
@@ -78,7 +75,6 @@ ZALO_ACTION_OPTIONS = [
     {"value": "edit", "label": "Sửa tài khoản / nơi nhận"},
     {"value": "delete", "label": "Xóa tài khoản / nơi nhận"},
 ]
-
 
 def _account_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
@@ -109,7 +105,6 @@ def _account_schema(defaults: dict[str, Any]) -> vol.Schema:
         }
     )
 
-
 def _general_options_schema(current: dict[str, Any], data: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
@@ -131,7 +126,6 @@ def _general_options_schema(current: dict[str, Any], data: dict[str, Any]) -> vo
             ),
         }
     )
-
 
 def _zalo_recipient_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
@@ -182,7 +176,6 @@ def _zalo_recipient_schema(defaults: dict[str, Any]) -> vol.Schema:
         }
     )
 
-
 def _validate_zalo_form(user_input: dict[str, Any]) -> dict[str, str]:
     errors: dict[str, str] = {}
     if not str(user_input.get(CONF_ZALO_RECIPIENT_NAME, "")).strip():
@@ -193,12 +186,10 @@ def _validate_zalo_form(user_input: dict[str, Any]) -> dict[str, str]:
         errors[CONF_ZALO_THREAD_ID] = "required_value"
     return errors
 
-
 class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a completely independent EVN CSKH Monitor config entry."""
 
     VERSION = 1
-
     @override
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -223,14 +214,12 @@ class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
-
     @override
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
     ) -> ConfigFlowResult:
         """Start reauthentication after EVN rejects stored credentials."""
         return await self.async_step_reauth_confirm()
-
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -265,7 +254,6 @@ class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reauth_confirm", data_schema=schema, errors=errors
         )
-
     @override
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
@@ -289,7 +277,6 @@ class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
-
     async def _async_validate(self, data: dict[str, Any]) -> str | None:
         customer_id = str(data[CONF_CUSTOMER_ID]).strip().upper()
         region = str(data[CONF_REGION])
@@ -301,7 +288,6 @@ class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         expected_region = CUSTOMER_ID_PREFIX_REGION.get(customer_id[:2])
         if expected_region and expected_region != region:
             return "wrong_region"
-
         api = EVNAPI(
             self.hass,
             region,
@@ -337,7 +323,6 @@ class EVNCSKHConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         finally:
             await api.close()
         return None
-
     @staticmethod
     @callback
     def async_get_options_flow(
@@ -351,7 +336,6 @@ class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
 
     def __init__(self) -> None:
         self._selected_recipient_id: str | None = None
-
     @override
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -361,7 +345,6 @@ class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             menu_options=["general", "zalo_accounts"],
         )
-
     async def async_step_general(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -379,7 +362,6 @@ class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
             step_id="general",
             data_schema=_general_options_schema(current, dict(self.config_entry.data)),
         )
-
     async def async_step_zalo_accounts(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -399,7 +381,6 @@ class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
                     return await self.async_step_zalo_edit()
                 if action == "delete":
                     return await self.async_step_zalo_delete()
-
         schema_fields: dict[Any, Any] = {
             vol.Required(CONF_ZALO_ACTION, default="add"): selector.SelectSelector(
                 selector.SelectSelectorConfig(
@@ -424,7 +405,6 @@ class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
                     mode=selector.SelectSelectorMode.DROPDOWN,
                 )
             )
-
         names = ", ".join(item["name"] for item in recipients) or "Chưa có"
         return self.async_show_form(
             step_id="zalo_accounts",
@@ -435,7 +415,6 @@ class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
                 "accounts": names,
             },
         )
-
     async def async_step_zalo_add(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -468,7 +447,6 @@ class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
             data_schema=_zalo_recipient_schema(defaults),
             errors=errors,
         )
-
     async def async_step_zalo_edit(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -502,7 +480,6 @@ class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
             errors=errors,
             description_placeholders={"name": selected["name"]},
         )
-
     async def async_step_zalo_delete(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -531,7 +508,6 @@ class EVNCSKHOptionsFlow(config_entries.OptionsFlow):
             errors=errors,
             description_placeholders={"name": selected["name"]},
         )
-
     def _save_recipients(self, recipients: list[dict[str, Any]]) -> ConfigFlowResult:
         options = without_legacy_zalo_options(dict(self.config_entry.options))
         options[CONF_ZALO_RECIPIENTS] = recipients

@@ -124,7 +124,6 @@ def period_consumption(snapshot: dict[str, Any], start: date, end: date) -> floa
             continue
     if count:
         return round(total, 3)
-
     # Fallback to meter-index delta when daily production is unavailable.
     before_start, _ = nearest_reading(snapshot, start - timedelta(days=1), direction="before")
     end_reading, _ = nearest_reading(snapshot, end, direction="before")
@@ -159,7 +158,6 @@ def official_cost_for_period(
 
 def estimate_electricity_cost(kwh: float | None) -> tuple[float | None, dict[str, Any]]:
     """Estimate residential tariff using the tariff table retained by the project.
-
     Official invoice amounts from EVN always take priority where available.
     """
     if kwh is None:

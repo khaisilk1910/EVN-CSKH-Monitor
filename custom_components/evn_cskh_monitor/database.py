@@ -16,7 +16,6 @@ import threading
 from typing import Any
 
 _SQLITE_LOCK = threading.RLock()
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily_consumption (
     customer_id TEXT NOT NULL,
@@ -27,7 +26,6 @@ CREATE TABLE IF NOT EXISTS daily_consumption (
 );
 CREATE INDEX IF NOT EXISTS idx_daily_customer_date
     ON daily_consumption(customer_id, ngay);
-
 CREATE TABLE IF NOT EXISTS monthly_bill (
     customer_id TEXT NOT NULL,
     thang INTEGER NOT NULL,
@@ -46,7 +44,6 @@ CREATE TABLE IF NOT EXISTS debt (
     amount REAL NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
-
 CREATE TABLE IF NOT EXISTS power_outage_schedule (
     customer_id TEXT NOT NULL,
     ngay_bat_dau TEXT NOT NULL,
@@ -57,7 +54,6 @@ CREATE TABLE IF NOT EXISTS power_outage_schedule (
     khu_vuc TEXT,
     PRIMARY KEY (customer_id, ngay_bat_dau, thoi_gian_bat_dau)
 );
-
 CREATE TABLE IF NOT EXISTS notifications (
     customer_id TEXT NOT NULL,
     notif_id TEXT NOT NULL,
@@ -70,7 +66,6 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_customer_time
     ON notifications(customer_id, thoi_gian DESC);
-
 CREATE TABLE IF NOT EXISTS raw_server_records (
     customer_id TEXT NOT NULL,
     source TEXT NOT NULL,
@@ -81,7 +76,6 @@ CREATE TABLE IF NOT EXISTS raw_server_records (
 );
 CREATE INDEX IF NOT EXISTS idx_raw_customer_source
     ON raw_server_records(customer_id, source, fetched_at DESC);
-
 CREATE TABLE IF NOT EXISTS integration_state (
     customer_id TEXT NOT NULL,
     state_key TEXT NOT NULL,
@@ -233,12 +227,23 @@ class EVNDatabase:
             )
             conn.commit()
 
-    def save_bills(self, customer_id: str, bills: list[dict[str, Any]]) -> None:
-        """Persist official bills without inventing a zero debt value.
+    def save_bills(
+        self,
+        customer_id: str,
+        bills: list[dict[str, Any]],
+        update_debt: bool = True,
+    ) -> None:
+        """Persist official bills without corrupting current outstanding debt.
+
+        ``update_debt`` must only be enabled for the live/current bill lookup.
+        Historical period lookups are archival: regional EVN gateways can return
+        status/amount fields describing that old invoice rather than the current
+        outstanding balance. Letting those responses update ``debt`` can make the
+        WebUI include already-paid historical invoices in "Tiền nợ".
 
         EVN occasionally returns an empty or partial bill list. In that case the
         previous known debt must not be overwritten with 0. A zero is persisted
-        only when at least one valid bill row contains an explicit payment
+        only when at least one valid live bill row contains an explicit payment
         status and none of those rows is marked unpaid.
         """
         now = datetime.now().astimezone().isoformat()
@@ -260,7 +265,6 @@ class EVNDatabase:
                 _first_value(bill, "TTRANG_TTOAN", "trang_thai", "status") or ""
             ).strip()
             rows.append((customer_id, month, year, amount, consumption, status, "invoice"))
-
             normalized_status = status.upper().replace(" ", "").replace("-", "_")
             if normalized_status:
                 debt_known = True
@@ -272,7 +276,6 @@ class EVNDatabase:
                 "CHƯATHANHTOÁN",
             } and amount is not None:
                 debt += amount
-
         with _SQLITE_LOCK, self._connect() as conn:
             if rows:
                 conn.executemany(
@@ -289,7 +292,7 @@ class EVNDatabase:
                     """,
                     rows,
                 )
-            if rows and debt_known:
+            if update_debt and rows and debt_known:
                 conn.execute(
                     """
                     INSERT INTO debt(customer_id, amount, updated_at)
@@ -369,7 +372,6 @@ class EVNDatabase:
                     str(outage.get("khu_vuc") or ""),
                 )
             )
-
         start_iso = window_start.date().isoformat()
         end_iso = window_end.date().isoformat()
         with _SQLITE_LOCK, self._connect() as conn:
@@ -483,7 +485,6 @@ class EVNDatabase:
                 """,
                 (customer_id, max(1, min(int(limit), 2000))),
             ).fetchall()
-
         result: list[tuple[str, Any]] = []
         for row in rows:
             try:
@@ -568,7 +569,6 @@ class EVNDatabase:
                 "SELECT state_value FROM integration_state WHERE customer_id=? AND state_key='last_sync'",
                 (customer_id,),
             ).fetchone()
-
         daily = []
         for row in daily_rows:
             iso = _display_date_to_iso(row["ngay"])

@@ -3,136 +3,136 @@
   "config": {
     "step": {
       "user": {
-        "title": "Thiết lập EVN CSKH Monitor",
-        "description": "Tích hợp mới, độc lập. Nhập tài khoản EVN và mã khách hàng để kiểm tra trực tiếp với máy chủ EVN.",
+        "title": "Set up EVN CSKH Monitor",
+        "description": "A new independent integration. Enter your EVN account and customer ID; the flow validates them against the EVN server.",
         "data": {
-          "region": "Khu vực điện lực",
-          "username": "Tên đăng nhập",
-          "password": "Mật khẩu",
-          "customer_id": "Mã khách hàng / công tơ"
+          "region": "Power region",
+          "username": "Username",
+          "password": "Password",
+          "customer_id": "Customer / meter ID"
         },
         "data_description": {
           "region": "PD=HN, PE=HCMC, PA/PH/PM/PN=NPC, PC/PP/PQ=CPC, PB/PK=SPC.",
-          "customer_id": "Mã khách hàng EVN bắt đầu bằng P hoặc S."
+          "customer_id": "EVN customer ID, normally starting with P or S."
         }
       },
       "reconfigure": {
-        "title": "Cấu hình lại tài khoản EVN",
+        "title": "Reconfigure EVN account",
         "data": {
-          "region": "Khu vực điện lực",
-          "username": "Tên đăng nhập",
-          "password": "Mật khẩu",
-          "customer_id": "Mã khách hàng / công tơ"
+          "region": "Power region",
+          "username": "Username",
+          "password": "Password",
+          "customer_id": "Customer / meter ID"
         }
       },
       "reauth_confirm": {
-        "title": "Xác thực lại tài khoản EVN",
-        "description": "Máy chủ EVN không còn chấp nhận thông tin đăng nhập đã lưu. Nhập lại tên đăng nhập và mật khẩu.",
+        "title": "Reauthenticate EVN account",
+        "description": "The EVN server no longer accepts the stored credentials. Enter the username and password again.",
         "data": {
-          "username": "Tên đăng nhập",
-          "password": "Mật khẩu"
+          "username": "Username",
+          "password": "Password"
         }
       }
     },
     "error": {
-      "invalid_customer_id": "Mã khách hàng không hợp lệ.",
-      "wrong_region": "Mã khách hàng không thuộc khu vực EVN đã chọn.",
-      "invalid_auth": "Không đăng nhập được. Hãy kiểm tra tên đăng nhập và mật khẩu.",
-      "cannot_connect": "Không thể kết nối hoặc đọc dữ liệu từ máy chủ EVN.",
-      "no_data": "Đăng nhập thành công nhưng máy chủ không trả dữ liệu cho mã khách hàng này."
+      "invalid_customer_id": "The customer ID is invalid.",
+      "wrong_region": "The customer ID does not match the selected EVN region.",
+      "invalid_auth": "Login failed. Check the username and password.",
+      "cannot_connect": "Could not connect to or read data from the EVN server.",
+      "no_data": "Login succeeded but EVN returned no data for this customer ID."
     },
     "abort": {
-      "already_configured": "Mã khách hàng này đã được cấu hình.",
-      "unique_id_mismatch": "Không thể đổi mã khách hàng của cấu hình hiện tại.",
-      "reconfigure_successful": "Đã cập nhật cấu hình EVN CSKH Monitor.",
-      "reauth_successful": "Đã xác thực lại tài khoản EVN."
+      "already_configured": "This customer ID is already configured.",
+      "unique_id_mismatch": "The customer ID of this entry cannot be changed.",
+      "reconfigure_successful": "EVN CSKH Monitor configuration updated.",
+      "reauth_successful": "EVN account reauthenticated."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Tùy chọn EVN CSKH Monitor",
-        "description": "Chọn phần bạn muốn quản lý.",
+        "title": "EVN CSKH Monitor options",
+        "description": "Choose what you want to manage.",
         "menu_options": {
-          "general": "Chu kỳ điện",
-          "zalo_accounts": "Tài khoản / nơi nhận Zalo"
+          "general": "Billing period",
+          "zalo_accounts": "Zalo destinations"
         },
         "menu_option_descriptions": {
-          "general": "Ngày bắt đầu kỳ điện của riêng công tơ này. Tiêu đề, mô tả và theme WebUI được chỉnh trực tiếp trong WebUI và dùng chung cho toàn bộ tích hợp.",
-          "zalo_accounts": "Thêm, sửa, xóa nhiều cấu hình Zalo Bot để gửi thông báo."
+          "general": "Billing start day for this meter. WebUI title, subtitle and theme are edited in the WebUI and shared by the whole integration.",
+          "zalo_accounts": "Add, edit, or delete multiple Zalo Bot sender/destination routes."
         }
       },
       "general": {
-        "title": "Chu kỳ điện",
-        "description": "Thiết lập này áp dụng riêng cho công tơ hiện tại và có hiệu lực ngay, không cần đăng nhập EVN lại.",
+        "title": "Billing period",
+        "description": "This setting applies only to the current meter and takes effect immediately without reconnecting to EVN.",
         "data": {
-          "ngaydauky": "Ngày bắt đầu kỳ điện"
+          "ngaydauky": "Billing period start day"
         },
         "data_description": {
-          "ngaydauky": "Ngày 1-31; nếu tháng ngắn hơn sẽ tự dùng ngày cuối tháng."
+          "ngaydauky": "Day 1-31. A day beyond the month length is clamped to the final day."
         }
       },
       "zalo_accounts": {
-        "title": "Quản lý Zalo",
-        "description": "Đang có {count} cấu hình: {accounts}. Mỗi cấu hình có thể dùng account_selection, type User/Group, thread_id và các công tắc gửi riêng.",
+        "title": "Manage Zalo destinations",
+        "description": "Configured: {count}. {accounts}. Each route can use a different Zalo Bot account, User/Group type, thread ID, and notification switches.",
         "data": {
-          "zalo_action": "Thao tác",
-          "zalo_recipient_id": "Tài khoản / nơi nhận"
+          "zalo_action": "Action",
+          "zalo_recipient_id": "Destination"
         }
       },
       "zalo_add": {
-        "title": "Thêm cấu hình Zalo",
-        "description": "Cấu hình mới sẽ lấy trạng thái hiện tại làm mốc ban đầu, vì vậy không gửi lại hóa đơn cũ, lịch cắt điện cũ hoặc sản lượng đã có.",
+        "title": "Add Zalo destination",
+        "description": "A new destination is baseline-seeded first, so it will not receive old invoices, old outages, or already-known daily production.",
         "data": {
-          "zalo_recipient_name": "Tên dễ nhớ",
-          "zalo_recipient_enabled": "Bật cấu hình này",
+          "zalo_recipient_name": "Display name",
+          "zalo_recipient_enabled": "Enabled",
           "zalo_type": "Type",
           "zalo_account_selection": "Zalo Bot account_selection",
           "zalo_thread_id": "thread_id",
-          "zalo_send_invoice": "Gửi PNG/PDF hóa đơn mới",
-          "zalo_send_daily": "Gửi sản lượng hằng ngày",
-          "zalo_send_outage": "Gửi lịch cắt điện"
+          "zalo_send_invoice": "Send new invoice PNG/PDF",
+          "zalo_send_daily": "Send daily production",
+          "zalo_send_outage": "Send outage schedules"
         },
         "data_description": {
           "zalo_type": "0 = User, 1 = Group.",
-          "zalo_account_selection": "Tài khoản gửi do tích hợp Zalo Bot cung cấp.",
-          "zalo_thread_id": "ID user/group nhận tin; lưu dạng chuỗi để không mất số với ID lớn.",
-          "zalo_send_invoice": "Chỉ gửi file thật mới hoặc file có thay đổi.",
-          "zalo_send_daily": "Gửi khi sản lượng hôm qua trong dữ liệu lưu thay đổi.",
-          "zalo_send_outage": "Gửi khi xuất hiện lịch cắt điện tương lai mới."
+          "zalo_account_selection": "Sender account exposed by the Zalo Bot integration.",
+          "zalo_thread_id": "Recipient user/group thread ID. Stored as text to preserve large IDs.",
+          "zalo_send_invoice": "Only new or changed real files are sent.",
+          "zalo_send_daily": "Send when yesterday's stored production changes.",
+          "zalo_send_outage": "Send when a new future outage appears."
         }
       },
       "zalo_edit": {
-        "title": "Sửa cấu hình Zalo",
-        "description": "Đang sửa {name}. Lịch sử chống gửi trùng được giữ lại nên đổi account/thread sẽ không gửi lại dữ liệu cũ.",
+        "title": "Edit Zalo destination",
+        "description": "Editing {name}. Existing dedupe history is preserved, so changing account or thread does not resend historical data.",
         "data": {
-          "zalo_recipient_name": "Tên dễ nhớ",
-          "zalo_recipient_enabled": "Bật cấu hình này",
+          "zalo_recipient_name": "Display name",
+          "zalo_recipient_enabled": "Enabled",
           "zalo_type": "Type",
           "zalo_account_selection": "Zalo Bot account_selection",
           "zalo_thread_id": "thread_id",
-          "zalo_send_invoice": "Gửi PNG/PDF hóa đơn mới",
-          "zalo_send_daily": "Gửi sản lượng hằng ngày",
-          "zalo_send_outage": "Gửi lịch cắt điện"
+          "zalo_send_invoice": "Send new invoice PNG/PDF",
+          "zalo_send_daily": "Send daily production",
+          "zalo_send_outage": "Send outage schedules"
         },
         "data_description": {
           "zalo_type": "0 = User, 1 = Group.",
-          "zalo_account_selection": "Tài khoản gửi do tích hợp Zalo Bot cung cấp.",
-          "zalo_thread_id": "ID user/group nhận tin; lưu dạng chuỗi để không mất số với ID lớn."
+          "zalo_account_selection": "Sender account exposed by the Zalo Bot integration.",
+          "zalo_thread_id": "Recipient user/group thread ID. Stored as text to preserve large IDs."
         }
       },
       "zalo_delete": {
-        "title": "Xóa cấu hình Zalo",
-        "description": "Xóa {name}? Chỉ cấu hình gửi Zalo bị xóa, dữ liệu EVN không bị ảnh hưởng.",
+        "title": "Delete Zalo destination",
+        "description": "Delete {name}? This only removes the notification route; EVN data is not deleted.",
         "data": {
-          "confirm_delete": "Xác nhận xóa"
+          "confirm_delete": "Confirm delete"
         }
       }
     },
     "error": {
-      "select_recipient": "Hãy chọn một cấu hình Zalo đang có.",
-      "confirm_delete": "Hãy bật xác nhận trước khi xóa.",
-      "required_value": "Không được để trống trường này."
+      "select_recipient": "Select an existing Zalo destination.",
+      "confirm_delete": "Turn on confirmation before deleting.",
+      "required_value": "A value is required."
     }
   }
 }
