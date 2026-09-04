@@ -69,9 +69,16 @@ class ZaloNotifier:
         }
 
     def _display_name(self) -> str:
+        """Return the latest user-visible Home Assistant device name."""
         return device_display_name(self.hass, self.entry, self.customer_id)
 
     async def async_seed_all(self, snapshot: dict[str, Any]) -> None:
+        """Mark the current snapshot as seen without sending any Zalo message.
+
+        This is used after the initial historical import, and also guarantees a
+        newly configured destination never receives a flood of old invoices,
+        old outages, or yesterday's already-known production value.
+        """
         recipients = self._recipients()
         if not recipients:
             return
@@ -80,27 +87,42 @@ class ZaloNotifier:
                 await self._async_seed_recipient(recipient, snapshot, force=True)
 
     async def async_seed_invoice_files(self, snapshot: dict[str, Any]) -> None:
+        """Baseline only invoice file fingerprints for all enabled routes.
+
+        Used by historical/raw-response recovery so an upgrade can recover old
+        PDF/PNG files without replaying them as new Zalo notifications.
+        """
         recipients = self._recipients()
         if not recipients:
             return
         async with self._process_lock:
-            files = await self.hass.async_add_executor_job(self._scan_invoice_files, snapshot)
+            files = await self.hass.async_add_executor_job(
+                self._scan_invoice_files, snapshot
+            )
             for recipient in recipients:
                 for kind, month, year, path in files:
-                    fingerprint = await self.hass.async_add_executor_job(_file_fingerprint, path)
+                    fingerprint = await self.hass.async_add_executor_job(
+                        _file_fingerprint, path
+                    )
                     await self._set_state(
-                        self._recipient_key(recipient, f"invoice_{kind}_{month}_{year}"),
+                        self._recipient_key(
+                            recipient, f"invoice_{kind}_{month}_{year}"
+                        ),
                         fingerprint,
                     )
 
     async def async_process(self, snapshot: dict[str, Any]) -> None:
+        """Process enabled notification types without overlapping service calls."""
         recipients = self._recipients()
         if not recipients:
             return
         async with self._process_lock:
             for recipient in recipients:
-                initialized = await self._async_seed_recipient(recipient, snapshot, force=False)
+                initialized = await self._async_seed_recipient(
+                    recipient, snapshot, force=False
+                )
                 if not initialized:
+                    # First observation is baseline-only by design.
                     continue
                 if recipient.get("send_invoice", False):
                     await self._async_send_invoice_files(recipient, snapshot)
@@ -116,12 +138,15 @@ class ZaloNotifier:
         try:
             async with asyncio.timeout(45):
                 await self.hass.services.async_call(
-                    ZALO_DOMAIN, service, data, blocking=True
+                    ZALO_DOMAIN,
+                    service,
+                    data,
+                    blocking=True,
                 )
             return True
         except asyncio.CancelledError:
             raise
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001 - third-party service errors vary
             _LOGGER.warning("Could not call %s.%s: %s", ZALO_DOMAIN, service, err)
             return False
 
@@ -137,7 +162,8 @@ class ZaloNotifier:
 
     @staticmethod
     def _recipient_key(recipient: dict[str, Any], suffix: str) -> str:
-        return f"zalo_{str(recipient['id'])}_{suffix}"
+        recipient_id = str(recipient["id"])
+        return f"zalo_{recipient_id}_{suffix}"
 
     async def _async_seed_recipient(
         self,
@@ -146,10 +172,12 @@ class ZaloNotifier:
         *,
         force: bool,
     ) -> bool:
+        """Seed dedupe state; return True only if it had already been initialized."""
         init_key = self._recipient_key(recipient, "initialized")
         already_initialized = await self._get_state(init_key) == "1"
         if already_initialized and not force:
             return True
+
         files = await self.hass.async_add_executor_job(self._scan_invoice_files, snapshot)
         for kind, month, year, path in files:
             fingerprint = await self.hass.async_add_executor_job(_file_fingerprint, path)
@@ -157,12 +185,19 @@ class ZaloNotifier:
                 self._recipient_key(recipient, f"invoice_{kind}_{month}_{year}"),
                 fingerprint,
             )
+
         daily_fingerprint = self._daily_fingerprint(snapshot)
         if daily_fingerprint is not None:
-            await self._set_state(self._recipient_key(recipient, "daily"), daily_fingerprint)
+            await self._set_state(
+                self._recipient_key(recipient, "daily"), daily_fingerprint
+            )
+
         outage_fingerprint = self._outage_fingerprint(snapshot)
         if outage_fingerprint is not None:
-            await self._set_state(self._recipient_key(recipient, "outage"), outage_fingerprint)
+            await self._set_state(
+                self._recipient_key(recipient, "outage"), outage_fingerprint
+            )
+
         await self._set_state(init_key, "1")
         return already_initialized
 
@@ -175,6 +210,7 @@ class ZaloNotifier:
             fingerprint = await self.hass.async_add_executor_job(_file_fingerprint, path)
             if await self._get_state(key) == fingerprint:
                 continue
+
             if kind == "png":
                 data = {
                     **self._base_data(recipient),
@@ -189,13 +225,20 @@ class ZaloNotifier:
                     "message": f"Chi tiết tiền điện tháng {month}/{year} của {self._display_name()}",
                 }
                 success = await self._async_service_call("send_file", data)
+
             if success:
                 await self._set_state(key, fingerprint)
 
     def _scan_invoice_files(
         self, snapshot: dict[str, Any]
     ) -> list[tuple[str, int, int, Path]]:
-        del snapshot
+        """Return validated invoice files, newest first.
+
+        Files are discovered from /config/evncskh/Invoices rather than from the
+        monthly snapshot. This handles regions where an attachment arrives in a
+        notification before the corresponding bill row is available.
+        """
+        del snapshot  # Signature retained for the existing executor call sites.
         pattern = re.compile(
             rf"^{re.escape(self.customer_id)}_(0?[1-9]|1[0-2])_(20\d{{2}})\.(pdf|png)$",
             re.IGNORECASE,
@@ -226,7 +269,8 @@ class ZaloNotifier:
 
     @staticmethod
     def _daily_fingerprint(snapshot: dict[str, Any]) -> str | None:
-        yesterday = dt_util.now().date() - timedelta(days=1)
+        now = dt_util.now()
+        yesterday = now.date() - timedelta(days=1)
         value = consumption_on(snapshot, yesterday)
         if value is None:
             return None
@@ -252,10 +296,12 @@ class ZaloNotifier:
         yesterday_value = consumption_on(snapshot, yesterday)
         if yesterday_value is None:
             return
+
         fingerprint = f"{yesterday.isoformat()}:{round(yesterday_value, 3)}"
         key = self._recipient_key(recipient, "daily")
         if await self._get_state(key) == fingerprint:
             return
+
         day_before = yesterday - timedelta(days=1)
         day_before_value = consumption_on(snapshot, day_before)
         billing_start = int(
@@ -268,12 +314,18 @@ class ZaloNotifier:
         current_start, _ = periods[0]
         prev_start, prev_end = periods[1]
         prev2_start, prev2_end = periods[2]
+
         current_kwh = period_consumption(snapshot, current_start, now.date())
-        current_cost, current_cost_meta = period_cost(snapshot, current_start, now.date(), billing_start)
+        current_cost, current_cost_meta = period_cost(
+            snapshot, current_start, now.date(), billing_start
+        )
         prev_kwh = period_consumption(snapshot, prev_start, prev_end)
         prev_cost, prev_cost_meta = period_cost(snapshot, prev_start, prev_end, billing_start)
         prev2_kwh = period_consumption(snapshot, prev2_start, prev2_end)
-        prev2_cost, prev2_cost_meta = period_cost(snapshot, prev2_start, prev2_end, billing_start)
+        prev2_cost, prev2_cost_meta = period_cost(
+            snapshot, prev2_start, prev2_end, billing_start
+        )
+
         message = (
             f"🚨 {self._display_name()}:\n\n"
             f"📈 Sản lượng hôm qua: {_format_kwh(yesterday_value)}.\n"
@@ -308,6 +360,7 @@ class ZaloNotifier:
         key = self._recipient_key(recipient, "outage")
         if await self._get_state(key) == fingerprint:
             return
+
         message = (
             f"⚡ Lịch cắt điện - {self._display_name()}\n\n"
             f"📅 Ngày: {event.get('start_date') or ''}\n"
@@ -328,16 +381,19 @@ def _file_fingerprint(path: Path) -> str:
 
 
 def _format_kwh(value: float | int | None) -> str:
+    """Format energy without turning missing server data into a fake zero."""
     if value is None:
         return "chưa có dữ liệu"
     return f"{format_number(value)} kWh"
 
 
 def _format_vnd(value: float | int | None) -> str:
+    """Format money without turning missing server data into a fake zero."""
     if value is None:
         return "chưa có dữ liệu"
     return f"{int(round(float(value))):,} đ"
 
 
 def _estimate_suffix(meta: dict[str, Any]) -> str:
+    """Label local tariff calculations separately from official EVN invoice money."""
     return " (ước tính)" if meta.get("estimated") else ""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 from .const import (
     CONF_ZALO_ACCOUNT_SELECTION,
     CONF_ZALO_RECIPIENT_ENABLED,
@@ -21,8 +22,10 @@ from .const import (
     DEFAULT_ZALO_TYPE,
 )
 
+
 def normalize_zalo_recipients(options: dict[str, Any]) -> list[dict[str, Any]]:
     """Return validated recipient dictionaries, migrating the old single route.
+
     The previous release stored one account_selection/thread_id pair directly in
     entry.options. Keeping this compatibility layer lets users upgrade without
     losing the existing Zalo destination. Once the Zalo manager is used, the
@@ -36,10 +39,12 @@ def normalize_zalo_recipients(options: dict[str, Any]) -> list[dict[str, Any]]:
             if normalized is not None:
                 recipients.append(normalized)
         return recipients
+
     account = str(options.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip()
     thread = str(options.get(CONF_ZALO_THREAD_ID, "")).strip()
     if not account or not thread:
         return []
+
     return [
         {
             "id": "legacy",
@@ -59,6 +64,7 @@ def normalize_zalo_recipients(options: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         }
     ]
+
 
 def recipient_from_form(
     form: dict[str, Any], recipient_id: str, *, default_name: str
@@ -83,6 +89,7 @@ def recipient_from_form(
         ),
     }
 
+
 def form_defaults(recipient: dict[str, Any]) -> dict[str, Any]:
     """Return field defaults used by add/edit forms."""
     return {
@@ -95,6 +102,7 @@ def form_defaults(recipient: dict[str, Any]) -> dict[str, Any]:
         CONF_ZALO_SEND_DAILY: bool(recipient.get("send_daily", False)),
         CONF_ZALO_SEND_OUTAGE: bool(recipient.get("send_outage", False)),
     }
+
 
 def without_legacy_zalo_options(options: dict[str, Any]) -> dict[str, Any]:
     """Drop superseded single-recipient option keys."""
@@ -109,6 +117,7 @@ def without_legacy_zalo_options(options: dict[str, Any]) -> dict[str, Any]:
     ):
         result.pop(key, None)
     return result
+
 
 def _normalize_recipient(item: Any, index: int) -> dict[str, Any] | None:
     if not isinstance(item, dict):
@@ -129,6 +138,7 @@ def _normalize_recipient(item: Any, index: int) -> dict[str, Any] | None:
         "send_daily": bool(item.get("send_daily", False)),
         "send_outage": bool(item.get("send_outage", False)),
     }
+
 
 def _normalize_type(value: Any) -> int:
     try:

@@ -15,6 +15,7 @@ def device_display_name(
     customer_id: str,
 ) -> str:
     """Return the current Home Assistant device name for a meter.
+
     Home Assistant Core 2026.8 restricts a device to one config entry and
     deprecates the ambiguous ``async_get_device`` lookup. Scope the identifier
     lookup to the owning config entry so user renames (``name_by_user``) are
@@ -28,6 +29,7 @@ def device_display_name(
         for candidate in (device.name_by_user, device.name):
             if candidate and str(candidate).strip():
                 return str(candidate).strip()
+
     if entry.title and entry.title.strip():
         return entry.title.strip()
     return f"{NAME} {customer_id}"

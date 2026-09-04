@@ -4,20 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-
 from pathlib import Path
 import shutil
 import tempfile
+
 from homeassistant.components import frontend, panel_custom
-
 from homeassistant.components.http import StaticPathConfig
-
 from homeassistant.config_entries import ConfigEntry
-
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
+
 from .const import (
     CONF_CUSTOMER_ID,
     CONF_PASSWORD,
@@ -36,10 +34,16 @@ from .const import (
 )
 from .coordinator import EVNDataUpdateCoordinator
 from .database import EVNDatabase
+from .debt_fix import install_debt_fix
 from .evn_api import EVNAPI
 from .frontend_assets import decode_frontend_assets
 from .views import async_register_views
 from .webui_settings import EVNWebUISettingsManager
+
+# Install the debt hotfix before any config-entry runtime objects are created.
+# This keeps invoice-history persistence and current-debt persistence separate.
+install_debt_fix()
+
 _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -56,8 +60,10 @@ class EVNCSKHRuntimeData:
 
 type EVNCSKHConfigEntry = ConfigEntry[EVNCSKHRuntimeData]
 
+
 def _sync_webui_assets(destination: Path, icon_source: Path, version: str) -> None:
     """Materialize WebUI assets only under /config/evncskh/webui.
+
     The custom component deliberately ships with no ``webui`` directory. The
     JS/HTML source is stored compactly in :mod:`frontend_assets` and decoded
     here in Home Assistant's executor. The existing integration brand icon is
@@ -72,6 +78,7 @@ def _sync_webui_assets(destination: Path, icon_source: Path, version: str) -> No
         and all((destination / name).is_file() for name in required)
     ):
         return
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(
         tempfile.mkdtemp(prefix=".webui-stage-", dir=str(destination.parent))
@@ -83,6 +90,7 @@ def _sync_webui_assets(destination: Path, icon_source: Path, version: str) -> No
             (stage / filename).write_bytes(content)
         shutil.copyfile(icon_source, stage / "icon.png")
         (stage / ".version").write_text(version, encoding="utf-8")
+
         if backup.exists():
             shutil.rmtree(backup)
         if destination.exists():
@@ -100,6 +108,7 @@ def _sync_webui_assets(destination: Path, icon_source: Path, version: str) -> No
         if stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
 
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up domain-level authenticated WebUI resources once."""
     domain_data = hass.data.setdefault(DOMAIN, {})
@@ -107,6 +116,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         settings_manager = EVNWebUISettingsManager(hass)
         await settings_manager.async_load()
         domain_data[WEBUI_SETTINGS_DATA_KEY] = settings_manager
+
     component_dir = Path(__file__).parent
     icon_source = component_dir / "brand" / "icon.png"
     data_dir = Path(hass.config.path(DATA_DIR_NAME))
@@ -117,12 +127,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     await hass.async_add_executor_job(
         _sync_webui_assets, webui_dir, icon_source, VERSION
     )
+
     # panel.js is cache-busted by VERSION in module_url, so static caching is
     # safe and avoids repeatedly transferring unchanged frontend assets.
     await hass.http.async_register_static_paths(
         [StaticPathConfig(WEBUI_URL_PREFIX, str(webui_dir), True)]
     )
     async_register_views(hass)
+
     # Use Home Assistant's custom-panel bridge instead of an ordinary iframe.
     # The bridge passes the authenticated `hass` object to panel.js, allowing
     # hass.callApi() to access our requires_auth=True endpoints without scraping
@@ -140,6 +152,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             config={},
         )
     return True
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> bool:
     """Set up one EVN account without waiting for the EVN cloud."""
@@ -161,6 +174,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> b
         data_dir,
         customer_id,
     )
+
     # Only local SQLite initialization/cache loading happens during setup. All
     # potentially slow EVN network work starts after entities are registered.
     await coordinator.async_initialize()
@@ -168,6 +182,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> b
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     # Do not start EVN network traffic until Home Assistant has fully started.
     # If an entry is added/reloaded while HA is already running, async_at_started
     # invokes this callback immediately. The refresh itself remains an
@@ -175,11 +190,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> b
     @callback
     def _schedule_initial_refresh(started_hass: HomeAssistant) -> None:
         """Schedule the first cloud refresh from Home Assistant's event loop.
+
         ``async_at_started`` wraps synchronous callables in ``HassJob``.  A
         plain synchronous function is treated as an executor job, which means
         calling ``ConfigEntry.async_create_background_task`` from it is unsafe:
         that API must run on Home Assistant's event-loop thread.  Marking this
         function with ``@callback`` keeps it on the loop.
+
         ``eager_start=False`` is equally intentional.  When a config entry is
         added/reloaded while Home Assistant is already running,
         ``async_at_started`` invokes the callback during ``async_setup_entry``.
@@ -195,6 +212,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> b
             name=f"{DOMAIN} initial refresh {entry.entry_id}",
             eager_start=False,
         )
+
     entry.async_on_unload(async_at_started(hass, _schedule_initial_refresh))
     return True
 
@@ -206,10 +224,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: EVNCSKHConfigEntry) -> 
         await entry.runtime_data.api.close()
     return unload_ok
 
+
 async def _async_update_listener(
     hass: HomeAssistant, entry: EVNCSKHConfigEntry
 ) -> None:
     """Apply option changes cheaply and reload only connection changes.
+
     Billing/Zalo options are read dynamically, so reloading the whole config
     entry would unnecessarily restart the EVN client and launch another cloud
     refresh. Domain-wide WebUI settings are stored separately and never reload
@@ -218,6 +238,7 @@ async def _async_update_listener(
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
         return
+
     api = runtime.api
     connection_changed = (
         str(entry.data.get(CONF_REGION, "")) != api.region
@@ -229,6 +250,7 @@ async def _async_update_listener(
     if connection_changed:
         await hass.config_entries.async_reload(entry.entry_id)
         return
+
     # Re-render cached sensors immediately for billing-period option changes.
     # ZaloNotifier reads its per-meter entry.options on demand.
     runtime.coordinator.async_update_listeners()

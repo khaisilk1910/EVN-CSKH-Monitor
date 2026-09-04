@@ -17,9 +17,11 @@ from .const import (
     CONF_ZALO_THREAD_ID,
 )
 from .webui_settings import webui_settings_manager
+
 _REDACT_ENTRY = {CONF_USERNAME, CONF_PASSWORD, CONF_CUSTOMER_ID}
 _REDACT_OPTIONS = {CONF_ZALO_ACCOUNT_SELECTION, CONF_ZALO_THREAD_ID, CONF_ZALO_RECIPIENTS}
 _REDACT_CUSTOMER = {"id", "name", "phone", "address", "management_unit"}
+
 
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: EVNCSKHConfigEntry

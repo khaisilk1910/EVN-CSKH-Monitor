@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from aiohttp import web
+
 from homeassistant.components.http import HomeAssistantView, require_admin
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -88,6 +89,8 @@ class EVNOptionsView(HomeAssistantView):
                             entry.data.get(CONF_NGAYDAUKY, DEFAULT_NGAYDAUKY),
                         )
                     ),
+                    # Kept on each account for backwards compatibility with
+                    # older copies of panel.js; values are now domain-wide.
                     "webui_title": settings[CONF_WEBUI_TITLE],
                     "webui_subtitle": settings[CONF_WEBUI_SUBTITLE],
                     "webui_theme": settings[CONF_WEBUI_THEME],
@@ -100,6 +103,7 @@ class EVNOptionsView(HomeAssistantView):
                 "webui": settings,
                 "webui_themes": list(WEBUI_THEMES),
                 "can_edit_webui": bool(user.is_admin),
+                # Kept for backwards compatibility with the prerelease WebUI.
                 "accounts_json": json.dumps(accounts, ensure_ascii=False),
             }
         )
@@ -126,12 +130,14 @@ class EVNWebUISettingsView(HomeAssistantView):
     @require_admin
     async def post(self, request: web.Request) -> web.Response:
         hass: HomeAssistant = request.app["hass"]
+
         try:
             payload = await request.json()
         except (json.JSONDecodeError, ValueError):
             return web.json_response({"error": "invalid_json"}, status=400)
         if not isinstance(payload, dict):
             return web.json_response({"error": "invalid_payload"}, status=400)
+
         manager = webui_settings_manager(hass)
         merged: dict[str, Any] = manager.as_dict()
         for key in (CONF_WEBUI_TITLE, CONF_WEBUI_SUBTITLE, CONF_WEBUI_THEME):
@@ -140,6 +146,7 @@ class EVNWebUISettingsView(HomeAssistantView):
             if not isinstance(payload[key], str):
                 return web.json_response({"error": f"invalid_{key}"}, status=400)
             merged[key] = payload[key]
+
         title = str(merged.get(CONF_WEBUI_TITLE, "")).strip()
         subtitle = str(merged.get(CONF_WEBUI_SUBTITLE, "")).strip()
         theme = str(merged.get(CONF_WEBUI_THEME, "")).strip()
@@ -149,6 +156,7 @@ class EVNWebUISettingsView(HomeAssistantView):
             return web.json_response({"error": "subtitle_too_long"}, status=400)
         if theme not in WEBUI_THEMES:
             return web.json_response({"error": "invalid_theme"}, status=400)
+
         settings = await manager.async_update(merged)
         return web.json_response({"settings": settings, "can_edit": True})
 
@@ -206,6 +214,7 @@ class EVNDailyDataView(HomeAssistantView):
                     "Ngày ISO": row.get("date"),
                     "Điện tiêu thụ (kWh)": _json_number(row.get("consumption")),
                     "CHISO": _json_number(row.get("reading")),
+                    # Tiered tariffs do not permit an exact per-day allocation.
                     "Tiền điện (VND)": None,
                 }
                 for row in runtime.coordinator.data.get("daily", [])
@@ -223,6 +232,7 @@ class EVNSummaryView(HomeAssistantView):
         entry, runtime = _runtime_for_account(hass, account)
         if runtime is None or entry is None:
             return web.json_response({"error": "account_not_found"}, status=404)
+
         snapshot = runtime.coordinator.data
         customer = dict(snapshot.get("customer", {}))
         settings = webui_settings_manager(hass).as_dict()
@@ -234,6 +244,7 @@ class EVNSummaryView(HomeAssistantView):
                 "webui_theme": settings[CONF_WEBUI_THEME],
             }
         )
+
         daily = list(snapshot.get("daily", []))
         monthly = list(snapshot.get("monthly", []))
         valid_daily = [
@@ -270,17 +281,19 @@ class EVNSummaryView(HomeAssistantView):
                     "expected_days": expected_days,
                     "coverage_percent": round(coverage, 2),
                     "total_kwh": round(total_kwh, 3),
-                    "average_kwh": round(total_kwh / len(valid_daily), 3) if valid_daily else None,
+                    "average_kwh": (
+                        round(total_kwh / len(valid_daily), 3) if valid_daily else None
+                    ),
                     "peak": peak,
                     "lowest": low,
                 },
                 "monthly": {
                     "records": len(monthly),
                     "official_invoice_count": len(official),
-                    "official_cost_total": round(sum(official_costs), 2) if official_costs else None,
+                    "official_cost_total": (
+                        round(sum(official_costs), 2) if official_costs else None
+                    ),
                 },
-                # IMPORTANT: this is the live debt snapshot. WebUI must never
-                # derive debt by adding official invoice totals.
                 "debt": snapshot.get("debt", {}),
                 "outage_count": len(snapshot.get("outages", [])),
                 "outages": [

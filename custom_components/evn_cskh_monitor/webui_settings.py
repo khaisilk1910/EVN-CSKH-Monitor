@@ -7,6 +7,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
+
 from .const import (
     CONF_WEBUI_SUBTITLE,
     CONF_WEBUI_THEME,
@@ -27,6 +28,7 @@ WEBUI_SUBTITLE_MAX_LENGTH = 180
 
 class EVNWebUISettingsManager:
     """Own one WebUI configuration shared by every EVN config entry."""
+
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
         self._store = Store[dict[str, str]](
@@ -39,6 +41,7 @@ class EVNWebUISettingsManager:
         )
         self._lock = asyncio.Lock()
         self._settings = self._defaults()
+
     @staticmethod
     def _defaults() -> dict[str, str]:
         return {
@@ -46,6 +49,7 @@ class EVNWebUISettingsManager:
             CONF_WEBUI_SUBTITLE: DEFAULT_WEBUI_SUBTITLE,
             CONF_WEBUI_THEME: DEFAULT_WEBUI_THEME,
         }
+
     @staticmethod
     def _normalize(data: dict[str, Any] | None) -> dict[str, str]:
         source = data or {}
@@ -63,8 +67,10 @@ class EVNWebUISettingsManager:
             CONF_WEBUI_SUBTITLE: subtitle[:WEBUI_SUBTITLE_MAX_LENGTH],
             CONF_WEBUI_THEME: theme,
         }
+
     def _legacy_entry_settings(self) -> dict[str, str] | None:
         """Pick one old per-entry WebUI value when upgrading from 2026.8.26.x.
+
         Older builds stored title/subtitle on every meter. The panel is global,
         so only one value can survive migration. Prefer a genuinely customized
         entry; otherwise use the first legacy entry deterministically.
@@ -89,6 +95,7 @@ class EVNWebUISettingsManager:
             ):
                 return candidate
         return candidates[0] if candidates else None
+
     async def async_load(self) -> None:
         """Load global WebUI settings without any cloud/network access."""
         stored = await self._store.async_load()
@@ -100,6 +107,7 @@ class EVNWebUISettingsManager:
         if legacy is None:
             self._settings = self._defaults()
             return
+
         self._settings = legacy
         # Persist the one-time migration so future entry removals cannot change
         # the global title/subtitle that the user already had configured.
@@ -108,6 +116,7 @@ class EVNWebUISettingsManager:
     def as_dict(self) -> dict[str, str]:
         """Return a detached JSON-serializable snapshot."""
         return dict(self._settings)
+
     async def async_update(self, data: dict[str, Any]) -> dict[str, str]:
         """Validate and persist a complete settings update."""
         normalized = self._normalize(data)

@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Any
+
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import UnitOfEnergy
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
+
 from . import EVNCSKHConfigEntry
 from .calculations import (
     consumption_on,
@@ -26,6 +28,7 @@ from .calculations import (
     period_rows,
 )
 from .const import CONF_NGAYDAUKY, DEFAULT_NGAYDAUKY, DOMAIN, NAME, VERSION
+
 SENSORS: dict[str, tuple[str, str]] = {
     "chi_so_cuoi_ky": ("Chỉ số cuối kỳ trước", "mdi:counter"),
     "chi_so_tam_chot": ("Chỉ số tạm chốt", "mdi:counter"),
@@ -48,6 +51,7 @@ SENSORS: dict[str, tuple[str, str]] = {
     "thong_bao_hoa_don": ("Thông báo hóa đơn", "mdi:receipt"),
     "thong_bao_truyen_thong": ("Thông báo truyền thông", "mdi:bullhorn"),
 }
+
 # Coordinator centralizes all inbound API updates for this read-only platform.
 PARALLEL_UPDATES = 0
 
@@ -57,6 +61,7 @@ NOTIFICATION_CATEGORIES = {
     "thong_bao_hoa_don": "HOADON",
     "thong_bao_truyen_thong": "TRUYEN_THONG",
 }
+
 
 async def async_setup_entry(
     hass,
@@ -70,10 +75,12 @@ async def async_setup_entry(
         for sensor_key, (name, icon) in SENSORS.items()
     )
 
+
 class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
     """A lightweight sensor calculated from the coordinator cache."""
 
     _attr_has_entity_name = True
+
     def __init__(
         self,
         entry: EVNCSKHConfigEntry,
@@ -88,6 +95,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
         self._attr_name = name
         self._attr_icon = icon
         self._attr_unique_id = f"{self.customer_id}_{sensor_key}"
+
         if (
             sensor_key.startswith("chi_so_")
             or sensor_key.startswith("tieu_thu_")
@@ -103,6 +111,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
             self._attr_device_class = SensorDeviceClass.MONETARY
         elif sensor_key == "lan_cap_nhat_cuoi":
             self._attr_device_class = SensorDeviceClass.TIMESTAMP
+
     @property
     def device_info(self) -> DeviceInfo:
         return DeviceInfo(
@@ -112,6 +121,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
             model=NAME,
             sw_version=VERSION,
         )
+
     @property
     def available(self) -> bool:
         # Cached local data remains usable during an EVN outage. The coordinator
@@ -122,6 +132,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> Any:
         value, _ = self._calculate()
         return value
+
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         _, attributes = self._calculate()
@@ -135,6 +146,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
                 self.entry.data.get(CONF_NGAYDAUKY, DEFAULT_NGAYDAUKY),
             )
         )
+
     def _calculate(self) -> tuple[Any, dict[str, Any]]:
         snapshot = self.coordinator.data or {}
         today = dt_util.now().date()
@@ -143,6 +155,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
         prev_start, prev_end = periods[1]
         prev2_start, prev2_end = periods[2]
         key = self.sensor_key
+
         if key == "chi_so_cuoi_ky":
             value, reading_date = nearest_reading(
                 snapshot, current_start - timedelta(days=1), direction="before"
@@ -152,6 +165,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
         if key == "chi_so_tam_chot":
             value, reading_date = nearest_reading(snapshot, today, direction="before")
             return _round(value), {"ngay_chot": reading_date.isoformat() if reading_date else None}
+
         if key in {
             "tieu_thu_ky_nay",
             "tieu_thu_ky_truoc",
@@ -166,6 +180,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
                 "bat_dau": start.isoformat(),
                 "ket_thuc": end.isoformat(),
             }
+
         if key in {"tien_dien_ky_nay", "tien_dien_ky_truoc", "tien_dien_ky_truoc_nua"}:
             start, end = {
                 "tien_dien_ky_nay": (current_start, today),
@@ -178,6 +193,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
                 "ket_thuc": end.isoformat(),
                 **details,
             }
+
         if key in {"tieu_thu_hom_nay", "tieu_thu_hom_qua", "tieu_thu_hom_kia"}:
             offset = {
                 "tieu_thu_hom_nay": 0,
@@ -186,6 +202,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
             }[key]
             target = today - timedelta(days=offset)
             return _round(consumption_on(snapshot, target)), {"ngay": target.isoformat()}
+
         if key == "chi_tiet_dien_tieu_thu_ky_nay":
             rows = period_rows(snapshot, current_start, today)
             details = [
@@ -203,6 +220,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
                 "so_ngay_co_du_lieu": sum(1 for row in rows if row.get("consumption") is not None),
                 "chi_tiet": details,
             }
+
         if key == "tien_dien_san_luong_nam_nay":
             rows = [
                 row for row in snapshot.get("monthly", []) if int(row.get("year") or 0) == today.year
@@ -227,6 +245,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
                     sum(float(row["consumption"]) for row in rows if row.get("consumption") is not None)
                 ),
             }
+
         if key == "lich_cat_dien":
             future = future_outages(snapshot, today)
             future_clean = [{k: v for k, v in row.items() if k != "_date"} for row in future]
@@ -234,6 +253,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
                 first = future_clean[0]
                 return "Có lịch cắt điện", {"gan_nhat": first, "tuong_lai": future_clean}
             return "Không có lịch cắt điện", {"tuong_lai": []}
+
         if key == "lan_cap_nhat_cuoi":
             raw = snapshot.get("last_sync")
             if not raw:
@@ -243,12 +263,14 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
             except ValueError:
                 return None, {"raw": raw, "partial_errors": snapshot.get("partial_errors", [])}
             return value, {"partial_errors": snapshot.get("partial_errors", [])}
+
         if key == "tien_no":
             debt = snapshot.get("debt", {})
             amount = debt.get("amount")
             if amount is None:
                 return None, {"cap_nhat": debt.get("updated_at")}
             return round(float(amount)), {"cap_nhat": debt.get("updated_at")}
+
         if key == "thong_tin_khach_hang":
             customer = snapshot.get("customer", {})
             return customer.get("name") or self.customer_id, {
@@ -259,6 +281,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
                 "don_vi_quan_ly": customer.get("management_unit"),
                 "raw_server_record_count": snapshot.get("raw_record_count", 0),
             }
+
         if key in NOTIFICATION_CATEGORIES:
             category = NOTIFICATION_CATEGORIES[key]
             items = [
@@ -275,6 +298,7 @@ class EVNCSKHSensor(CoordinatorEntity, SensorEntity):
                 "noi_dung": latest.get("content"),
                 "gan_day": items,
             }
+
         return None, {}
 
 
