@@ -9,9 +9,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    CONF_WEBUI_AVERAGE_MIN_KWH,
     CONF_WEBUI_SUBTITLE,
     CONF_WEBUI_THEME,
     CONF_WEBUI_TITLE,
+    DEFAULT_WEBUI_AVERAGE_MIN_KWH,
     DEFAULT_WEBUI_SUBTITLE,
     DEFAULT_WEBUI_THEME,
     DEFAULT_WEBUI_TITLE,
@@ -31,7 +33,7 @@ class EVNWebUISettingsManager:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
-        self._store = Store[dict[str, str]](
+        self._store = Store[dict[str, Any]](
             hass,
             WEBUI_STORAGE_VERSION,
             WEBUI_STORAGE_KEY,
@@ -43,21 +45,30 @@ class EVNWebUISettingsManager:
         self._settings = self._defaults()
 
     @staticmethod
-    def _defaults() -> dict[str, str]:
+    def _defaults() -> dict[str, Any]:
         return {
             CONF_WEBUI_TITLE: DEFAULT_WEBUI_TITLE,
             CONF_WEBUI_SUBTITLE: DEFAULT_WEBUI_SUBTITLE,
             CONF_WEBUI_THEME: DEFAULT_WEBUI_THEME,
+            CONF_WEBUI_AVERAGE_MIN_KWH: DEFAULT_WEBUI_AVERAGE_MIN_KWH,
         }
 
     @staticmethod
-    def _normalize(data: dict[str, Any] | None) -> dict[str, str]:
+    def _normalize(data: dict[str, Any] | None) -> dict[str, Any]:
         source = data or {}
         title = str(source.get(CONF_WEBUI_TITLE, DEFAULT_WEBUI_TITLE)).strip()
         subtitle = str(
             source.get(CONF_WEBUI_SUBTITLE, DEFAULT_WEBUI_SUBTITLE)
         ).strip()
         theme = str(source.get(CONF_WEBUI_THEME, DEFAULT_WEBUI_THEME)).strip()
+        try:
+            average_min_kwh = float(
+                source.get(CONF_WEBUI_AVERAGE_MIN_KWH, DEFAULT_WEBUI_AVERAGE_MIN_KWH)
+            )
+        except (TypeError, ValueError):
+            average_min_kwh = DEFAULT_WEBUI_AVERAGE_MIN_KWH
+        if not (0 <= average_min_kwh <= 100000):
+            average_min_kwh = DEFAULT_WEBUI_AVERAGE_MIN_KWH
         if not title:
             title = DEFAULT_WEBUI_TITLE
         if theme not in WEBUI_THEMES:
@@ -66,16 +77,17 @@ class EVNWebUISettingsManager:
             CONF_WEBUI_TITLE: title[:WEBUI_TITLE_MAX_LENGTH],
             CONF_WEBUI_SUBTITLE: subtitle[:WEBUI_SUBTITLE_MAX_LENGTH],
             CONF_WEBUI_THEME: theme,
+            CONF_WEBUI_AVERAGE_MIN_KWH: average_min_kwh,
         }
 
-    def _legacy_entry_settings(self) -> dict[str, str] | None:
+    def _legacy_entry_settings(self) -> dict[str, Any] | None:
         """Pick one old per-entry WebUI value when upgrading from 2026.8.26.x.
 
         Older builds stored title/subtitle on every meter. The panel is global,
         so only one value can survive migration. Prefer a genuinely customized
         entry; otherwise use the first legacy entry deterministically.
         """
-        candidates: list[dict[str, str]] = []
+        candidates: list[dict[str, Any]] = []
         entries = sorted(
             self._hass.config_entries.async_entries(DOMAIN),
             key=lambda entry: entry.entry_id,
@@ -113,11 +125,11 @@ class EVNWebUISettingsManager:
         # the global title/subtitle that the user already had configured.
         await self._store.async_save(dict(self._settings))
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, Any]:
         """Return a detached JSON-serializable snapshot."""
         return dict(self._settings)
 
-    async def async_update(self, data: dict[str, Any]) -> dict[str, str]:
+    async def async_update(self, data: dict[str, Any]) -> dict[str, Any]:
         """Validate and persist a complete settings update."""
         normalized = self._normalize(data)
         async with self._lock:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from aiohttp import web
@@ -16,6 +17,7 @@ from .const import (
     API_URL_PREFIX,
     CONF_CUSTOMER_ID,
     CONF_NGAYDAUKY,
+    CONF_WEBUI_AVERAGE_MIN_KWH,
     CONF_WEBUI_SUBTITLE,
     CONF_WEBUI_THEME,
     CONF_WEBUI_TITLE,
@@ -146,6 +148,15 @@ class EVNWebUISettingsView(HomeAssistantView):
             if not isinstance(payload[key], str):
                 return web.json_response({"error": f"invalid_{key}"}, status=400)
             merged[key] = payload[key]
+
+        if CONF_WEBUI_AVERAGE_MIN_KWH in payload:
+            try:
+                average_min_kwh = float(payload[CONF_WEBUI_AVERAGE_MIN_KWH])
+            except (TypeError, ValueError):
+                return web.json_response({"error": "invalid_average_min_kwh"}, status=400)
+            if not math.isfinite(average_min_kwh) or not 0 <= average_min_kwh <= 100000:
+                return web.json_response({"error": "invalid_average_min_kwh"}, status=400)
+            merged[CONF_WEBUI_AVERAGE_MIN_KWH] = average_min_kwh
 
         title = str(merged.get(CONF_WEBUI_TITLE, "")).strip()
         subtitle = str(merged.get(CONF_WEBUI_SUBTITLE, "")).strip()

@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "evn_cskh_monitor"
 NAME = "EVN CSKH Monitor"
-VERSION = "2026.9.4.1"
+VERSION = "2026.9.4.2"
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 # Connection/config-entry data.
@@ -25,6 +25,7 @@ CONF_NGAYDAUKY = "ngaydauky"
 CONF_WEBUI_TITLE = "webui_title"
 CONF_WEBUI_SUBTITLE = "webui_subtitle"
 CONF_WEBUI_THEME = "webui_theme"
+CONF_WEBUI_AVERAGE_MIN_KWH = "webui_average_min_kwh"
 
 # Multi-recipient Zalo configuration. Each item in CONF_ZALO_RECIPIENTS is a
 # serializable dict so Home Assistant can persist it in the config entry options.
@@ -45,6 +46,7 @@ DEFAULT_NGAYDAUKY = 1
 DEFAULT_WEBUI_TITLE = NAME
 DEFAULT_WEBUI_SUBTITLE = "Dữ liệu EVN, hóa đơn, sản lượng và lịch cắt điện"
 DEFAULT_WEBUI_THEME = "midnight_sapphire"
+DEFAULT_WEBUI_AVERAGE_MIN_KWH = 5.0
 WEBUI_THEMES = (
     "midnight_sapphire",
     "obsidian_gold",
@@ -64,6 +66,8 @@ DEFAULT_ZALO_SEND_INVOICE = False
 DEFAULT_ZALO_SEND_DAILY = False
 DEFAULT_ZALO_SEND_OUTAGE = False
 
+# Regional backends. NPC is the official Northern Power Corporation region
+# identifier used by EVN Northern Power Corporation services.
 REGION_HN = "HN"
 REGION_NPC = "NPC"
 REGION_CPC = "CPC"
@@ -84,6 +88,7 @@ CUSTOMER_ID_PREFIX_REGION = {
     "PK": REGION_SPC,
 }
 
+# Local storage. The path resolves to /config/evncskh on a normal HA install.
 DATA_DIR_NAME = "evncskh"
 DB_FILENAME = "evncskh.db"
 INVOICES_DIR_NAME = "Invoices"
@@ -92,25 +97,47 @@ WEBUI_SETTINGS_DATA_KEY = "webui_settings_manager"
 WEBUI_STORAGE_KEY = f"{DOMAIN}.webui"
 WEBUI_STORAGE_VERSION = 1
 
+# Polling cadence. EVN daily readings normally change once per day, while bills
+# and outage notifications may change independently. One-hour polling is a good
+# compromise without hammering the upstream services.
 UPDATE_INTERVAL = timedelta(hours=1)
 REFRESH_WINDOW_DAYS = 10
 RECENT_BOOTSTRAP_DAYS = 45
 DAILY_BATCH_DAYS = 15
 
+# Initial history bootstrap. A newly added meter loads the whole previous
+# calendar year plus the current year through today, if EVN has data. This is a
+# background task and never blocks Home Assistant startup.
 HISTORY_PREVIOUS_YEARS = 1
 HISTORY_BOOTSTRAP_DELAY_SECONDS = 15
 HISTORY_BATCH_PAUSE_SECONDS = 0.25
 HISTORY_MONTH_PAUSE_SECONDS = 0.20
 
+# HTTP/network behavior.
+#
+# EVN regional gateways occasionally accept the TCP/TLS connection quickly but
+# take longer to produce response headers.  Keep a bounded total timeout so a
+# dead upstream can never hold a coordinator forever, while allowing a little
+# more headroom than the old flat 30-second timeout.  Connection failures still
+# fail fast via the dedicated connect timeout.
 REQUEST_TIMEOUT_SECONDS = 45
 REQUEST_CONNECT_TIMEOUT_SECONDS = 10
 REQUEST_READ_TIMEOUT_SECONDS = 30
 
+# A Home Assistant instance can contain several EVN meters.  Without a domain-
+# wide limiter each coordinator could start five lookup requests at once after
+# startup, creating a thundering herd against the same EVN gateway.  Three
+# concurrent cloud calls keeps refreshes responsive without flooding EVN.
 MAX_CONCURRENT_EVN_REQUESTS = 3
 NETWORK_SEMAPHORE_DATA_KEY = "network_semaphore"
 
+# If every current-data endpoint is unavailable, retry sooner than the normal
+# one-hour polling cadence.  Home Assistant's current DataUpdateCoordinator
+# understands UpdateFailed(retry_after=...).
 FAILED_REFRESH_RETRY_SECONDS = 10 * 60
 
+# Web panel/API paths are unique to this integration. Only the webui subfolder is
+# exposed as static content; the SQLite database and invoice files remain private.
 PANEL_URL_PATH = "evn_cskh_monitor"
 WEBUI_URL_PREFIX = "/evncskh-monitor"
 API_URL_PREFIX = "/api/evncskh"
